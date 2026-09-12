@@ -12,15 +12,23 @@ class WorkflowTransitionError(ValueError):
     """Raised when a persisted RCA Run contains an illegal state change."""
 
 
-_NEXT_STATES = {
-    "created": "collected",
-    "collected": "evidence_ready",
-    "evidence_ready": "kb_ready",
-    "kb_ready": "drafted",
-    "drafted": "evaluated",
-    "evaluated": "awaiting_decision",
-    "awaiting_decision": "completed",
+_ALLOWED_NEXT_STATES = {
+    "created": frozenset({"collected"}),
+    "collected": frozenset({"evidence_ready"}),
+    "evidence_ready": frozenset({"kb_ready"}),
+    "kb_ready": frozenset({"drafted"}),
+    "drafted": frozenset({"evaluated"}),
+    "evaluated": frozenset({"awaiting_decision"}),
+    "awaiting_decision": frozenset({"completed", "written_back"}),
 }
+
+_FIXTURE_NEXT_STATES = {
+    state: next(iter(next_states))
+    for state, next_states in _ALLOWED_NEXT_STATES.items()
+    if state != "awaiting_decision"
+}
+_FIXTURE_NEXT_STATES["awaiting_decision"] = "completed"
+_TERMINAL_STATES = frozenset({"completed", "written_back"})
 
 
 @dataclass(frozen=True)
@@ -34,6 +42,12 @@ class RcaRun:
     state_history: tuple[str, ...]
     report_path: Path
     writeback_decision: str
+    collection_run_id: str
+    kb_revision: str
+    kb_passage_ids: tuple[str, ...]
+    evaluation_result: str
+    model_prompt: str
+    jira_event_ids: tuple[str, ...]
 
 
 class _LocalRunStore:
@@ -50,6 +64,12 @@ class _LocalRunStore:
             state_history=("created",),
             report_path=self._output_root / run_id / "rca-report.md",
             writeback_decision="not_requested",
+            collection_run_id="not_collected",
+            kb_revision="not_retrieved",
+            kb_passage_ids=(),
+            evaluation_result="fixture_completed",
+            model_prompt="fixture-v1",
+            jira_event_ids=(),
         )
         self.save(run)
         return run
@@ -68,6 +88,12 @@ class _LocalRunStore:
             state_history=tuple(record["state_history"]),
             report_path=self._output_root / run_id / record["report_file"],
             writeback_decision=record["writeback_decision"],
+            collection_run_id=record["collection_run_id"],
+            kb_revision=record["kb_revision"],
+            kb_passage_ids=tuple(record["kb_passage_ids"]),
+            evaluation_result=record["evaluation_result"],
+            model_prompt=record["model_prompt"],
+            jira_event_ids=tuple(record["jira_event_ids"]),
         )
 
     def save(self, run: RcaRun) -> None:
@@ -81,6 +107,12 @@ class _LocalRunStore:
             "state_history": list(run.state_history),
             "report_file": run.report_path.name,
             "writeback_decision": run.writeback_decision,
+            "collection_run_id": run.collection_run_id,
+            "kb_revision": run.kb_revision,
+            "kb_passage_ids": list(run.kb_passage_ids),
+            "evaluation_result": run.evaluation_result,
+            "model_prompt": run.model_prompt,
+            "jira_event_ids": list(run.jira_event_ids),
         }
         (run_directory / "run.json").write_text(
             json.dumps(record, indent=2) + "\n", encoding="utf-8"
@@ -116,15 +148,16 @@ class RcaWorkflow:
         return run
 
     def _complete_fixture_run(self, run: RcaRun) -> RcaRun:
-        while run.state != "completed":
+        while run.state not in _TERMINAL_STATES:
             run = self._advance(run)
-        self._render_report(run)
+        if not run.report_path.exists():
+            self._render_report(run)
         self._store.save(run)
         return run
 
     def _advance(self, run: RcaRun) -> RcaRun:
         try:
-            next_state = _NEXT_STATES[run.state]
+            next_state = _FIXTURE_NEXT_STATES[run.state]
         except KeyError as error:
             raise WorkflowTransitionError(
                 f"Fixture run cannot advance from terminal or unknown state: {run.state}"
@@ -143,7 +176,7 @@ class RcaWorkflow:
         if run.state_history[-1] != run.state:
             raise WorkflowTransitionError("Workflow State must match the persisted state history")
         for current, next_state in zip(run.state_history, run.state_history[1:]):
-            if _NEXT_STATES.get(current) != next_state:
+            if next_state not in _ALLOWED_NEXT_STATES.get(current, frozenset()):
                 raise WorkflowTransitionError(
                     f"Illegal Workflow State transition: {current} -> {next_state}"
                 )
@@ -166,8 +199,9 @@ class RcaWorkflow:
             "## Provenance\n\n"
             f"- RCA Run: {run.run_id}\n"
             "- Model Runner: fixture\n"
-            "- Collection Run: not collected\n"
-            "- KB revision: not retrieved\n"
+            f"- Collection Run: {run.collection_run_id.replace('_', ' ')}\n"
+            f"- KB revision: {run.kb_revision.replace('_', ' ')}\n"
+            f"- Prompt: {run.model_prompt}\n"
             "- Writeback Decision: not requested\n",
             encoding="utf-8",
         )

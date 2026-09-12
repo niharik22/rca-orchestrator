@@ -4,8 +4,8 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] `rca-run`, `rca-show`, and Resume produce observable local RCA Run behavior through the single RcaWorkflow seam.
-- [ ] Legal and illegal Workflow State transitions are persisted and verified with fixture-driven tests.
-- [ ] The fixed Markdown RCA Report and local provenance record are created without any Jira mutation.
+- [x] `rca-run`, `rca-show`, and Resume produce observable local RCA Run behavior through the single RcaWorkflow seam.
+- [x] Legal and illegal Workflow State transitions are persisted and verified with fixture-driven tests.
+- [x] The fixed Markdown RCA Report and local provenance record are created without any Jira mutation.
