@@ -1,0 +1,41 @@
+# Operating-system files
+.DS_Store
+Thumbs.db
+
+# Python environments and bytecode
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Python tooling
+.pytest_cache/
+.mypy_cache/
+.pyre/
+.pytype/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Packaging artifacts
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+
+# Local runtime data and secrets
+outputs/
+.env
+.env.*
+!.env.example
+.secrets/
+
+# Editor and IDE state
+.idea/
+.vscode/
+*.swp
+*.swo
