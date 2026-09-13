@@ -79,3 +79,34 @@ demo session, set `RCA_ORCHESTRATOR_COPILOT_MODEL` or
 available tools, built-in MCPs, custom instructions, and remote session access
 disabled. It provides the prompt through standard input and retains the prompt
 and raw structured output only in the local RCA Run record.
+
+## Terminal-confirmed Jira writeback
+
+After a completed evaluation, `rca-run` displays the run and asks:
+
+```text
+Write this RCA evaluation back to Jira? [y/N]:
+```
+
+Pressing Enter or entering anything other than `y` records `declined` locally
+and makes no Jira mutation. Entering `y` records `approved` first, then asks
+Jira Intelligence to make the permitted idempotent writeback. The Jira
+Intelligence service must be configured with its separately scoped write
+credential and allowed project keys.
+
+For `needs_evidence` and `escalated`, RCA writes only a clearly labelled status
+comment. For `passed`, it writes that comment and uploads the Markdown RCA
+report. Set the following path to the *same directory* that Jira Intelligence
+uses as `JIRA_INTELLIGENCE_UPLOAD_SOURCE_ROOT` (or its workspace root when that
+setting is omitted):
+
+```powershell
+$env:RCA_ORCHESTRATOR_JIRA_INTELLIGENCE_UPLOAD_SOURCE_ROOT = "C:\path\to\jira-intelligence-workspace"
+```
+
+RCA places only `rca-report.md` in the required
+`<upload-root>/<issue>/runs/<collection-run>/analysis/` directory. If the
+directory contains another file, it refuses the passed writeback rather than
+risk uploading an unrelated artifact. The local RCA record persists the
+terminal decision and Jira Intelligence Writeback Event IDs; replaying an
+approved run uses the same independent comment and attachment idempotency keys.

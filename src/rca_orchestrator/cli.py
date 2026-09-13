@@ -6,7 +6,7 @@ import argparse
 import os
 from pathlib import Path
 
-from .jira_intelligence import JiraIntelligenceHttpClient
+from .jira_intelligence import JiraIntelligenceError, JiraIntelligenceHttpClient
 from .knowledge_base import ManifestKnowledgeBase
 from .model_runner import CopilotCliRunner, ModelRunnerError
 from .workflow import AttachmentLimits, RcaRun, RcaWorkflow
@@ -41,6 +41,7 @@ def _configured_workflow(output_root: Path) -> RcaWorkflow:
             executable=os.environ.get("RCA_ORCHESTRATOR_COPILOT_COMMAND", "copilot"),
             model=os.environ.get("RCA_ORCHESTRATOR_COPILOT_MODEL"),
         ),
+        analysis_root=_analysis_root(),
     )
 
 
@@ -56,6 +57,11 @@ def _attachment_limits_from_environment() -> AttachmentLimits:
             "RCA_ORCHESTRATOR_ATTACHMENT_MODEL_CHARACTERS", 200_000
         ),
     )
+
+
+def _analysis_root() -> Path | None:
+    configured_root = os.environ.get("RCA_ORCHESTRATOR_JIRA_INTELLIGENCE_UPLOAD_SOURCE_ROOT")
+    return Path(configured_root) if configured_root else None
 
 
 def _positive_environment_integer(name: str, default: int) -> int:
@@ -95,9 +101,17 @@ def run_main() -> None:
             if arguments.resume
             else workflow.run(arguments.issue_key, arguments.model, arguments.product_version)
         )
-    except (ModelRunnerError, ValueError) as error:
+    except (JiraIntelligenceError, ModelRunnerError, ValueError) as error:
         parser.error(str(error))
     _print_run(run)
+    if run.state == "completed" and run.evaluation_result in {"passed", "needs_evidence", "escalated"}:
+        try:
+            decided = workflow.confirm_writeback(
+                run.run_id, approved=input("Write this RCA evaluation back to Jira? [y/N]: ").strip().lower() == "y"
+            )
+        except (JiraIntelligenceError, ValueError) as error:
+            parser.error(str(error))
+        print(f"Writeback Decision: {decided.writeback_decision}")
 
 
 def show_main() -> None:

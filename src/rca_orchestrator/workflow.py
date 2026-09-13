@@ -93,6 +93,7 @@ class RcaRun:
     evaluator_raw_output: str | None = None
     analyst_model: str | None = None
     evaluator_model: str | None = None
+    writeback_event_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -155,6 +156,12 @@ class _DefaultFixtureJiraIntelligence:
         self, issue_key: str, collection_run_id: str, reference: str, max_bytes: int
     ) -> bytes:
         raise JiraIntelligenceError("Fixture Jira Intelligence has no Attachment Evidence.")
+
+    def post_status_comment(self, *_arguments: object, **_keywords: object) -> tuple[str, ...]:
+        raise JiraIntelligenceError("Fixture Jira Intelligence cannot write back to Jira.")
+
+    def upload_analysis_report(self, *_arguments: object, **_keywords: object) -> tuple[str, ...]:
+        raise JiraIntelligenceError("Fixture Jira Intelligence cannot write back to Jira.")
 
 
 class _DefaultFixtureKnowledgeBase:
@@ -237,6 +244,7 @@ class _LocalRunStore:
             evaluator_raw_output=_invocation_value(record, "evaluator", "raw_output"),
             analyst_model=_invocation_value(record, "analyst", "model"),
             evaluator_model=_invocation_value(record, "evaluator", "model"),
+            writeback_event_ids=tuple(record.get("writeback_event_ids", ())),
         )
 
     def save(self, run: RcaRun) -> None:
@@ -250,6 +258,7 @@ class _LocalRunStore:
             "state_history": list(run.state_history),
             "report_file": run.report_path.name,
             "writeback_decision": run.writeback_decision,
+            "writeback_event_ids": list(run.writeback_event_ids),
             "collection_run_id": run.collection_run_id,
             "kb_revision": run.kb_revision,
             "kb_passage_ids": list(run.kb_passage_ids),
@@ -321,6 +330,7 @@ class RcaWorkflow:
         jira_intelligence_client: JiraIntelligenceClient | None = None,
         knowledge_base: KnowledgeBase | None = None,
         attachment_limits: AttachmentLimits | None = None,
+        analysis_root: Path | None = None,
     ) -> None:
         if run_store is None:
             if output_root is None:
@@ -332,6 +342,7 @@ class RcaWorkflow:
         self._knowledge_base = knowledge_base or _DefaultFixtureKnowledgeBase()
         self._attachment_limits = attachment_limits or AttachmentLimits()
         self._model_runner = model_runner or CopilotCliRunner()
+        self._analysis_root = analysis_root
 
     def run(self, issue_key: str, model: str, product_version: str | None = None) -> RcaRun:
         """Start and finish one Fixture Runner RCA Run using collected evidence."""
@@ -368,6 +379,48 @@ class RcaWorkflow:
         run = self._store.load(run_id)
         self._validate_history(run)
         return run
+
+    def confirm_writeback(self, run_id: str, *, approved: bool) -> RcaRun:
+        """Persist a terminal decision and perform only the allowed Jira mutation."""
+        run = self.get(run_id)
+        if run.state != "completed" or run.evaluation_result not in {"passed", "needs_evidence", "escalated"}:
+            raise WorkflowTransitionError("Writeback requires a completed RCA Run with an Evaluation Result.")
+        if run.writeback_decision == "declined":
+            return run
+        if not approved:
+            decided = replace(run, writeback_decision="declined")
+            self._update_report_writeback_decision(decided)
+            self._store.save(decided)
+            return decided
+
+        approved_run = replace(run, writeback_decision="approved")
+        self._update_report_writeback_decision(approved_run)
+        self._store.save(approved_run)
+        collection_run_id = _required_collection_run_id(approved_run)
+        approval_reference = f"terminal-approval-{approved_run.run_id}"
+        if approved_run.evaluation_result == "passed":
+            self._stage_analysis_report(approved_run)
+        comment_events = self._jira_intelligence_client.post_status_comment(
+            approved_run.issue_key,
+            _status_comment(approved_run),
+            collection_run_id=collection_run_id,
+            orchestration_run_id=approved_run.run_id,
+            approval_reference=approval_reference,
+            idempotency_key=f"rca-comment-{approved_run.run_id}",
+        )
+        written = replace(approved_run, writeback_event_ids=comment_events)
+        self._store.save(written)
+        if approved_run.evaluation_result == "passed":
+            attachment_events = self._jira_intelligence_client.upload_analysis_report(
+                approved_run.issue_key,
+                collection_run_id=collection_run_id,
+                orchestration_run_id=approved_run.run_id,
+                approval_reference=approval_reference,
+                idempotency_key=f"rca-attachment-{approved_run.run_id}",
+            )
+            written = replace(written, writeback_event_ids=(*comment_events, *attachment_events))
+        self._store.save(written)
+        return written
 
     def _continue_run(self, run: RcaRun, product_version: str | None) -> RcaRun:
         if run.state == "created":
@@ -618,6 +671,32 @@ class RcaWorkflow:
             encoding="utf-8",
         )
 
+    def _update_report_writeback_decision(self, run: RcaRun) -> None:
+        if not run.report_path.exists():
+            return
+        report = run.report_path.read_text(encoding="utf-8")
+        run.report_path.write_text(
+            report.replace("- Writeback Decision: not requested", f"- Writeback Decision: {run.writeback_decision}"),
+            encoding="utf-8",
+        )
+
+    def _stage_analysis_report(self, run: RcaRun) -> None:
+        if self._analysis_root is None:
+            raise JiraIntelligenceError(
+                "RCA_ORCHESTRATOR_JIRA_INTELLIGENCE_UPLOAD_SOURCE_ROOT must be configured for a passed RCA Report writeback."
+            )
+        analysis_directory = self._analysis_root / run.issue_key / "runs" / _required_collection_run_id(run) / "analysis"
+        analysis_directory.mkdir(parents=True, exist_ok=True)
+        analysis_report = analysis_directory / "rca-report.md"
+        unexpected = tuple(
+            path
+            for path in analysis_directory.iterdir()
+            if path != analysis_report and path.name != ".jira-intelligence"
+        )
+        if unexpected:
+            raise JiraIntelligenceError("Jira Intelligence analysis directory contains files outside this RCA Report.")
+        analysis_report.write_text(run.report_path.read_text(encoding="utf-8"), encoding="utf-8")
+
     def _render_live_report(self, run: RcaRun) -> None:
         assert run.analyst_draft is not None
         assert run.evaluation is not None
@@ -658,6 +737,20 @@ def _required_collection_run_id(run: RcaRun) -> str:
     if run.collection_run_id is None:
         raise WorkflowTransitionError("Evidence Package requires a Collection Run.")
     return run.collection_run_id
+
+
+def _status_comment(run: RcaRun) -> str:
+    assert run.evaluation_result is not None
+    result = run.evaluation_result.replace("_", " ")
+    if run.evaluation_result == "passed":
+        return (
+            f"RCA Orchestrator status: Evaluation Result is {result}. "
+            "The evidence-cited RCA Report is attached."
+        )
+    return (
+        f"RCA Orchestrator status: Evaluation Result is {result}. "
+        "No RCA Report is attached; this result requires follow-up before a root-cause conclusion."
+    )
 
 
 def _matching_metadata_index(

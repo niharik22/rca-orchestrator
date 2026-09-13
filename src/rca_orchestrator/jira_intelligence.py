@@ -36,9 +36,30 @@ class JiraIntelligenceClient(Protocol):
         self, issue_key: str, collection_run_id: str, reference: str, max_bytes: int
     ) -> bytes: ...
 
+    def post_status_comment(
+        self,
+        issue_key: str,
+        plain_text: str,
+        *,
+        collection_run_id: str,
+        orchestration_run_id: str,
+        approval_reference: str,
+        idempotency_key: str,
+    ) -> tuple[str, ...]: ...
+
+    def upload_analysis_report(
+        self,
+        issue_key: str,
+        *,
+        collection_run_id: str,
+        orchestration_run_id: str,
+        approval_reference: str,
+        idempotency_key: str,
+    ) -> tuple[str, ...]: ...
+
 
 class JiraIntelligenceHttpClient:
-    """Collects Jira evidence only through the local Jira Intelligence API."""
+    """Uses Jira Intelligence's loopback evidence and controlled-writeback API."""
 
     def __init__(
         self,
@@ -126,6 +147,50 @@ class JiraIntelligenceHttpClient:
             raise JiraIntelligenceError("Jira Intelligence artifact retrieval returned invalid content.")
         return response
 
+    def post_status_comment(
+        self,
+        issue_key: str,
+        plain_text: str,
+        *,
+        collection_run_id: str,
+        orchestration_run_id: str,
+        approval_reference: str,
+        idempotency_key: str,
+    ) -> tuple[str, ...]:
+        payload = self._post_json(
+            issue_key,
+            "comments",
+            {
+                "plain_text": plain_text,
+                "collection_run_id": collection_run_id,
+                "orchestration_run_id": orchestration_run_id,
+                "approval_reference": approval_reference,
+            },
+            idempotency_key,
+        )
+        return _event_ids(payload, "Jira Intelligence comment writeback")
+
+    def upload_analysis_report(
+        self,
+        issue_key: str,
+        *,
+        collection_run_id: str,
+        orchestration_run_id: str,
+        approval_reference: str,
+        idempotency_key: str,
+    ) -> tuple[str, ...]:
+        payload = self._post_json(
+            issue_key,
+            "attachments",
+            {
+                "collection_run_id": collection_run_id,
+                "orchestration_run_id": orchestration_run_id,
+                "approval_reference": approval_reference,
+            },
+            idempotency_key,
+        )
+        return _event_ids(payload, "Jira Intelligence attachment writeback")
+
     def _json_response(self, path: str) -> dict[str, Any]:
         request = Request(f"{self._base_url}{path}", method="GET")
         try:
@@ -137,6 +202,24 @@ class JiraIntelligenceHttpClient:
             raise JiraIntelligenceError("Jira Intelligence artifact list returned an invalid response.")
         return payload
 
+    def _post_json(
+        self, issue_key: str, operation: str, payload: dict[str, str], idempotency_key: str
+    ) -> dict[str, Any]:
+        request = Request(
+            f"{self._base_url}/v1/issues/{quote(issue_key.upper(), safe='')}/{operation}",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Idempotency-Key": idempotency_key},
+            method="POST",
+        )
+        try:
+            response = self._request(request)
+            response_payload = json.loads(response.decode("utf-8"))
+        except (HTTPError, URLError, OSError, json.JSONDecodeError, ValueError) as error:
+            raise JiraIntelligenceError(f"Jira Intelligence {operation} writeback failed: {error}") from error
+        if not isinstance(response_payload, dict):
+            raise JiraIntelligenceError(f"Jira Intelligence {operation} writeback returned an invalid response.")
+        return response_payload
+
 
 def _read_response(request: Request) -> bytes:
     with urlopen(request, timeout=30) as response:  # noqa: S310 - loopback URL is validated above.
@@ -146,3 +229,13 @@ def _read_response(request: Request) -> bytes:
 def _read_response_limited(request: Request, max_bytes: int) -> bytes:
     with urlopen(request, timeout=30) as response:  # noqa: S310 - loopback URL is validated above.
         return response.read(max_bytes + 1)
+
+
+def _event_ids(payload: dict[str, Any], operation: str) -> tuple[str, ...]:
+    events = payload.get("writeback_events", [payload])
+    if not isinstance(events, list):
+        raise JiraIntelligenceError(f"{operation} returned invalid events.")
+    event_ids = tuple(event.get("id") for event in events if isinstance(event, dict))
+    if len(event_ids) != len(events) or not all(isinstance(event_id, str) and event_id for event_id in event_ids):
+        raise JiraIntelligenceError(f"{operation} returned an event without an identifier.")
+    return event_ids
