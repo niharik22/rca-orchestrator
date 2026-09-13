@@ -20,7 +20,7 @@ _ALLOWED_NEXT_STATES = {
     "kb_ready": frozenset({"drafted"}),
     "drafted": frozenset({"evaluated"}),
     "evaluated": frozenset({"awaiting_decision"}),
-    "awaiting_decision": frozenset({"completed", "written_back"}),
+    "awaiting_decision": frozenset({"completed"}),
 }
 
 _FIXTURE_NEXT_STATES = {
@@ -32,7 +32,7 @@ _FIXTURE_NEXT_STATES = {
     "evaluated": "awaiting_decision",
     "awaiting_decision": "completed",
 }
-_TERMINAL_STATES = frozenset({"completed", "written_back"})
+_TERMINAL_STATES = frozenset({"completed"})
 
 
 @dataclass(frozen=True)
@@ -90,7 +90,7 @@ class _DefaultFixtureRunner:
             collection_run_id=f"fixture-collection-{issue_key}",
             kb_revision="fixture-kb-v1",
             kb_passage_ids=(),
-            evaluation_result="fixture_completed",
+            evaluation_result="needs_evidence",
             model_prompt="fixture-v1",
             jira_event_ids=(),
         )
@@ -250,13 +250,13 @@ class RcaWorkflow:
         run.report_path.write_text(
             "# RCA Report: " + run.issue_key + "\n\n"
             "## Outcome and confidence\n\n"
-            "Fixture analysis completed with demo-only confidence.\n\n"
+            "Evaluation Result: needs_evidence. Fixture analysis has demo-only confidence.\n\n"
             "## Jira observations\n\n"
             "- Fixture Collection Run only; live Jira collection has not run.\n\n"
             "## KB guidance and citations\n\n"
             "- Fixture KB guidance only; live KB retrieval has not run.\n\n"
             "## Hypotheses\n\n"
-            "- Fixture hypothesis: confirm the live evidence before concluding root cause.\n\n"
+            "- Fixture hypothesis: confirm the live evidence before accepting this Hypothesis.\n\n"
             "## Unknowns and missing evidence\n\n"
             "- Live Jira and KB evidence are intentionally unavailable in fixture mode.\n\n"
             "## Next actions\n\n"
@@ -267,6 +267,7 @@ class RcaWorkflow:
             f"- Collection Run: {run.collection_run_id.replace('_', ' ')}\n"
             f"- KB revision: {run.kb_revision.replace('_', ' ')}\n"
             f"- Prompt: {run.model_prompt}\n"
+            f"- Evaluation Result: {run.evaluation_result}\n"
             "- Writeback Decision: not requested\n",
             encoding="utf-8",
         )

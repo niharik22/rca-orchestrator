@@ -34,13 +34,13 @@ def test_fixture_run_persists_completed_run_and_markdown_report(tmp_path: Path) 
     assert run.report_path.read_text(encoding="utf-8") == (
         "# RCA Report: PC-123\n\n"
         "## Outcome and confidence\n\n"
-        "Fixture analysis completed with demo-only confidence.\n\n"
+        "Evaluation Result: needs_evidence. Fixture analysis has demo-only confidence.\n\n"
         "## Jira observations\n\n"
         "- Fixture Collection Run only; live Jira collection has not run.\n\n"
         "## KB guidance and citations\n\n"
         "- Fixture KB guidance only; live KB retrieval has not run.\n\n"
         "## Hypotheses\n\n"
-        "- Fixture hypothesis: confirm the live evidence before concluding root cause.\n\n"
+        "- Fixture hypothesis: confirm the live evidence before accepting this Hypothesis.\n\n"
         "## Unknowns and missing evidence\n\n"
         "- Live Jira and KB evidence are intentionally unavailable in fixture mode.\n\n"
         "## Next actions\n\n"
@@ -51,6 +51,7 @@ def test_fixture_run_persists_completed_run_and_markdown_report(tmp_path: Path) 
         "- Collection Run: fixture-collection-PC-123\n"
         "- KB revision: fixture-kb-v1\n"
         "- Prompt: fixture-v1\n"
+        "- Evaluation Result: needs_evidence\n"
         "- Writeback Decision: not requested\n"
     )
     assert (tmp_path / run.run_id / "run.json").is_file()
@@ -64,7 +65,7 @@ def test_fixture_run_persists_explicit_local_provenance(tmp_path: Path) -> None:
     assert record["collection_run_id"] == "fixture-collection-PC-123"
     assert record["kb_revision"] == "fixture-kb-v1"
     assert record["kb_passage_ids"] == []
-    assert record["evaluation_result"] == "fixture_completed"
+    assert record["evaluation_result"] == "needs_evidence"
     assert record["model_prompt"] == "fixture-v1"
     assert record["jira_event_ids"] == []
 
@@ -119,16 +120,6 @@ def test_resume_returns_existing_fixture_run_without_creating_another_report(tmp
             "evaluated",
             "awaiting_decision",
         ),
-        (
-            "created",
-            "collected",
-            "evidence_ready",
-            "kb_ready",
-            "drafted",
-            "evaluated",
-            "awaiting_decision",
-            "written_back",
-        ),
     ],
 )
 def test_resume_accepts_each_legal_persisted_workflow_state(
@@ -140,7 +131,7 @@ def test_resume_accepts_each_legal_persisted_workflow_state(
 
     resumed = workflow.resume(run.run_id)
 
-    assert resumed.state == ("written_back" if state_history[-1] == "written_back" else "completed")
+    assert resumed.state == "completed"
 
 
 @pytest.mark.parametrize(
@@ -178,6 +169,16 @@ def test_resume_accepts_each_legal_persisted_workflow_state(
             "completed",
             "collected",
         ),
+        (
+            "created",
+            "collected",
+            "evidence_ready",
+            "kb_ready",
+            "drafted",
+            "evaluated",
+            "awaiting_decision",
+            "written_back",
+        ),
     ],
 )
 def test_resume_rejects_each_illegal_persisted_workflow_transition(
@@ -208,7 +209,7 @@ class _FixtureRunner:
             collection_run_id="fixture-collection-from-test",
             kb_revision="fixture-kb-from-test",
             kb_passage_ids=(),
-            evaluation_result="fixture_completed",
+            evaluation_result="needs_evidence",
             model_prompt="fixture-v1",
             jira_event_ids=(),
         )
