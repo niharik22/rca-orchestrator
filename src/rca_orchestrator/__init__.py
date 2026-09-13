@@ -1,5 +1,5 @@
 """Local Root Cause Analysis orchestration."""
 
-from .workflow import RcaRun, RcaWorkflow, WorkflowTransitionError
+from .workflow import FixtureProvenance, RcaRun, RcaWorkflow, WorkflowTransitionError
 
-__all__ = ["RcaRun", "RcaWorkflow", "WorkflowTransitionError"]
+__all__ = ["FixtureProvenance", "RcaRun", "RcaWorkflow", "WorkflowTransitionError"]

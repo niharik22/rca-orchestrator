@@ -26,13 +26,17 @@ def run_main() -> None:
     parser = argparse.ArgumentParser(prog="rca-run")
     parser.add_argument("issue_key", nargs="?")
     parser.add_argument("--resume", metavar="RCA_RUN_ID")
-    parser.add_argument("--model", default="fixture")
+    parser.add_argument("--model", choices=("fixture",))
     parser.add_argument("--output-root")
     arguments = parser.parse_args()
     if arguments.resume and arguments.issue_key:
         parser.error("issue_key cannot be used with --resume")
     if not arguments.resume and not arguments.issue_key:
         parser.error("issue_key is required unless --resume is used")
+    if not arguments.resume and not arguments.model:
+        parser.error("--model is required when starting an RCA Run")
+    if arguments.resume and arguments.model:
+        parser.error("--model cannot be used with --resume")
 
     workflow = RcaWorkflow(_output_root(arguments.output_root))
     run = (

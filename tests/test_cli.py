@@ -22,6 +22,13 @@ def test_fixture_commands_start_show_and_resume_a_local_run(tmp_path: Path) -> N
     assert _field(resumed.stdout, "RCA Run") == run_id
 
 
+def test_starting_a_run_requires_an_explicit_model_choice(tmp_path: Path) -> None:
+    started = _run("rca-run", "PC-123", "--output-root", str(tmp_path))
+
+    assert started.returncode == 2
+    assert "--model is required" in started.stderr
+
+
 def _run(command: str, *arguments: str) -> subprocess.CompletedProcess[str]:
     executable = which(command)
     assert executable is not None, f"{command} is not installed in the test environment"
