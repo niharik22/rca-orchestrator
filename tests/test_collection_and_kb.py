@@ -200,6 +200,60 @@ domains:
     assert "runtime-transactions:domains/runtime-transactions/troubleshooting/concepts.md" in run.kb_passage_ids
 
 
+def test_unreadable_selected_kb_passage_persists_a_blocked_run(tmp_path: Path) -> None:
+    _write_kb(
+        tmp_path,
+        """
+kb_revision: pc-50.16.0-p1
+domains:
+  - id: runtime-transactions
+    path: domains/runtime-transactions
+    keywords: [runtime]
+""",
+    )
+    domain = tmp_path / "domains" / "runtime-transactions"
+    domain.mkdir(parents=True)
+    (domain / "index.yaml").write_text("passages: [invalid.md]\n", encoding="utf-8")
+    (domain / "invalid.md").write_bytes(b"\xff")
+
+    run = RcaWorkflow(
+        output_root=tmp_path / "outputs",
+        jira_intelligence_client=_FakeJiraIntelligence(),
+        knowledge_base=ManifestKnowledgeBase(tmp_path),
+    ).run("PC-123", "fixture")
+
+    assert run.state == "blocked"
+    assert run.blocked_reason == "Unable to read KB passage: domains/runtime-transactions/invalid.md"
+    assert not run.report_path.exists()
+
+
+def test_empty_kb_passage_is_not_rendered_as_a_citation(tmp_path: Path) -> None:
+    _write_kb(
+        tmp_path,
+        """
+kb_revision: pc-50.16.0-p1
+domains:
+  - id: runtime-transactions
+    path: domains/runtime-transactions
+    keywords: [runtime]
+""",
+    )
+    domain = tmp_path / "domains" / "runtime-transactions"
+    domain.mkdir(parents=True)
+    (domain / "index.yaml").write_text("passages: [empty.md]\n", encoding="utf-8")
+    (domain / "empty.md").write_text("\n\n", encoding="utf-8")
+
+    run = RcaWorkflow(
+        output_root=tmp_path / "outputs",
+        jira_intelligence_client=_FakeJiraIntelligence(),
+        knowledge_base=ManifestKnowledgeBase(tmp_path),
+    ).run("PC-123", "fixture")
+
+    assert run.state == "completed"
+    assert run.kb_passages == ()
+    assert "## KB guidance and citations\n\n- None." in run.report_path.read_text(encoding="utf-8")
+
+
 def test_workflow_uses_jira_intelligence_adapter_for_collection(tmp_path: Path) -> None:
     def respond(request: object) -> bytes:
         return json.dumps(

@@ -114,7 +114,12 @@ class ManifestKnowledgeBase:
             path = self._contained_path(Path(domain.relative_path) / relative_path)
             if not path.is_file():
                 continue
-            source = path.read_text(encoding="utf-8")
+            try:
+                source = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as error:
+                raise KnowledgeBaseError(f"Unable to read KB passage: {path.relative_to(self._root)}") from error
+            if not source.strip():
+                continue
             relative = path.relative_to(self._root).as_posix()
             passages.append(
                 KBPassage(
@@ -134,6 +139,8 @@ class ManifestKnowledgeBase:
             raise KnowledgeBaseError(f"Required KB file is missing: {contained.relative_to(self._root)}")
         try:
             parsed = yaml.safe_load(contained.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError) as error:
+            raise KnowledgeBaseError(f"Unable to read KB file: {contained.relative_to(self._root)}") from error
         except yaml.YAMLError as error:
             raise KnowledgeBaseError(f"Invalid YAML in {contained.relative_to(self._root)}") from error
         if not isinstance(parsed, dict):
@@ -141,7 +148,10 @@ class ManifestKnowledgeBase:
         return parsed
 
     def _contained_path(self, relative_path: str | Path) -> Path:
-        candidate = (self._root / relative_path).resolve()
+        try:
+            candidate = (self._root / relative_path).resolve()
+        except OSError as error:
+            raise KnowledgeBaseError("Unable to resolve a KB path.") from error
         try:
             candidate.relative_to(self._root)
         except ValueError as error:
