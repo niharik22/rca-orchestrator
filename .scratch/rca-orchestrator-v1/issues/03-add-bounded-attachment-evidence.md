@@ -4,7 +4,7 @@
 
 **Blocked by:** 02 — Collect Jira evidence and retrieve cited KB guidance.
 
-**Status:** ready-for-agent
+**Status:** completed
 
 - [ ] Only the approved text-like attachment types are admitted, subject to configurable per-file, aggregate, and model-package limits.
 - [ ] Unsupported, linked, missing, or oversized attachments remain visible without being sent to a Model Runner.

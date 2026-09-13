@@ -13,7 +13,7 @@ from .evidence import CollectionEvidence, evidence_from_intelligence_envelope
 
 
 class JiraIntelligenceError(RuntimeError):
-    """Raised when Jira Intelligence cannot create or return a Collection Run."""
+    """Raised when Jira Intelligence cannot provide required RCA evidence."""
 
 
 @dataclass(frozen=True)
