@@ -72,6 +72,7 @@ def test_copilot_run_persists_an_analyst_draft_and_fresh_evaluator_outcome(tmp_p
     assert "Evaluation Result: needs_evidence." in report
     assert "## Hypotheses" in report
     assert "A runtime dependency is missing." in report
+    assert "## Most likely explanation" in report
     assert "## Evaluation evidence gaps and contradictions" in report
     assert "No deployment manifest citation is available." in report
     assert "- KB version applicability: unverified" in report
@@ -131,8 +132,47 @@ def test_malformed_copilot_analysis_blocks_the_run_without_fixture_fallback(tmp_
     assert run.state == "blocked"
     assert "unknown evidence reference: not-a-citation" in run.blocked_reason
     assert run.evaluation_result is None
+    assert run.model_prompt == ""
+    assert run.analyst_prompt is None
     assert not run.report_path.exists()
     assert model_runner.calls == ["preflight", "analyst"]
+
+
+def test_malformed_evaluator_output_persists_a_resumable_blocked_run(tmp_path: Path) -> None:
+    model_runner = _FakeModelRunner(
+        analyst_output=_valid_analyst_output(),
+        evaluator_output={
+            "result": "passed", "citation_gaps": ["Missing source"], "contradictions": [],
+            "unknowns": [], "rationale": "This cannot pass.",
+        },
+    )
+    workflow = RcaWorkflow(output_root=tmp_path, jira_intelligence_client=_FakeJiraIntelligence(),
+                           knowledge_base=_FakeKnowledgeBase(), model_runner=model_runner)
+
+    run = workflow.run("PC-123", "copilot")
+
+    assert run.state == "blocked"
+    assert run.state_history[-2:] == ("drafted", "blocked")
+    assert workflow.get(run.run_id) == run
+
+
+def test_resume_preflights_a_copilot_run_before_another_model_invocation(tmp_path: Path) -> None:
+    completed_runner = _FakeModelRunner(analyst_output=_valid_analyst_output(), evaluator_output=_valid_evaluator_output())
+    original = RcaWorkflow(output_root=tmp_path, jira_intelligence_client=_FakeJiraIntelligence(),
+                            knowledge_base=_FakeKnowledgeBase(), model_runner=completed_runner).run("PC-123", "copilot")
+    record_path = tmp_path / original.run_id / "run.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record.update({"state": "kb_ready", "state_history": ["created", "collected", "evidence_ready", "kb_ready"],
+                   "analyst_draft": None, "evaluation": None, "evaluation_result": None,
+                   "model_invocations": {"analyst": None, "evaluator": None}})
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+    workflow = RcaWorkflow(output_root=tmp_path, jira_intelligence_client=_FakeJiraIntelligence(),
+                           knowledge_base=_FakeKnowledgeBase(), model_runner=_PreflightFailureRunner())
+
+    with pytest.raises(ModelRunnerError, match="Run `copilot login`"):
+        workflow.resume(original.run_id)
+
+    assert workflow.get(original.run_id).state == "kb_ready"
 
 
 class _FakeJiraIntelligence:
@@ -210,3 +250,15 @@ class _FakeModelRunner:
 class _PreflightFailureRunner:
     def preflight(self) -> None:
         raise ModelRunnerError("Copilot CLI is not authenticated. Run `copilot login` and retry.")
+
+
+def _valid_analyst_output() -> dict[str, object]:
+    return {
+        "hypotheses": [{"title": "Runtime dependency missing", "supporting_evidence": ["jira:observation:1"],
+                          "contradicting_evidence": [], "unknowns": [], "confidence": 0.6}],
+        "most_likely_explanation": "Dependency absent", "unknowns": [], "recommended_actions": [],
+    }
+
+
+def _valid_evaluator_output() -> dict[str, object]:
+    return {"result": "needs_evidence", "citation_gaps": [], "contradictions": [], "unknowns": [], "rationale": "Need more evidence."}

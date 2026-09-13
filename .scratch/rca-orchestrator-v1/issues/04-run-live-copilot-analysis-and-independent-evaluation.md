@@ -4,7 +4,7 @@
 
 **Blocked by:** 02 — Collect Jira evidence and retrieve cited KB guidance.
 
-**Status:** ready-for-agent
+**Status:** completed
 
 - [ ] Copilot CLI preflight failures are actionable and never silently switch to Fixture Runner behavior.
 - [ ] Model Runner inputs are analysis-only and structured output is validated before Workflow State advances.
