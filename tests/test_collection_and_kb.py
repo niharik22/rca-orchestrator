@@ -4,10 +4,14 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 
-from rca_orchestrator.evidence import CollectionEvidence, EvidencePackage
-from rca_orchestrator.jira_intelligence import JiraIntelligenceError, JiraIntelligenceHttpClient
+from rca_orchestrator.evidence import AttachmentMetadata, CollectionEvidence, EvidencePackage
+from rca_orchestrator.jira_intelligence import (
+    ArtifactDescriptor,
+    JiraIntelligenceError,
+    JiraIntelligenceHttpClient,
+)
 from rca_orchestrator.knowledge_base import KBPassage, KBSelection, ManifestKnowledgeBase
-from rca_orchestrator.workflow import RcaWorkflow
+from rca_orchestrator.workflow import AttachmentLimits, RcaWorkflow
 
 
 def test_fixture_run_records_jira_evidence_kb_citations_and_unverified_product_version(
@@ -26,7 +30,7 @@ def test_fixture_run_records_jira_evidence_kb_citations_and_unverified_product_v
     assert run.collection_run_id == "collection-123"
     assert run.confirmed_observations == ("Summary: Policy binding fails", "Component: runtime")
     assert run.reported_claims == ("Description: NullPointerException while binding",)
-    assert run.missing_evidence == ("No Jira attachments were collected in Ticket 2.",)
+    assert run.missing_evidence == ()
     assert run.kb_passage_ids == ("runtime-transactions:concepts.md",)
     assert run.kb_domains == ("runtime-transactions",)
     assert run.product_version is None
@@ -255,7 +259,7 @@ domains:
 
 
 def test_workflow_uses_jira_intelligence_adapter_for_collection(tmp_path: Path) -> None:
-    def respond(request: object) -> bytes:
+    def respond(request: object, max_bytes: int | None = None) -> bytes:
         return json.dumps(
             {
                 "collection_run": {"id": "collection-123"},
@@ -278,12 +282,161 @@ def test_workflow_uses_jira_intelligence_adapter_for_collection(tmp_path: Path) 
     assert run.reported_claims == ("Description: NullPointerException while binding",)
 
 
+def test_attachment_evidence_is_bounded_and_its_exclusions_are_visible(tmp_path: Path) -> None:
+    jira = _FakeJiraIntelligence(
+        artifacts=(
+            ArtifactDescriptor("a-trace", "jira_attachment", "trace.log", "text/plain", 8),
+            ArtifactDescriptor("b-manual", "jira_attachment", "manual.pdf", "application/pdf", 4),
+            ArtifactDescriptor("c-large", "jira_attachment", "large.log", "text/plain", 11),
+            ArtifactDescriptor("d-source", "jira_attachment", "source.js", "text/javascript", 8),
+            ArtifactDescriptor("e-linked", "rca_analysis", "prior.md", "text/markdown", 5),
+        ),
+        artifact_content={
+            "a-trace": b"timeout!",
+            "b-manual": b"%PDF",
+            "c-large": b"01234567890",
+            "d-source": b"let x=1;",
+            "e-linked": b"prior",
+        },
+        attachment_metadata=(
+            {"id": "missing", "filename": "missing.txt", "mime_type": "text/plain", "size": 3},
+        ),
+    )
+    kb = _FakeKnowledgeBase()
+    run = RcaWorkflow(
+        output_root=tmp_path,
+        jira_intelligence_client=jira,
+        knowledge_base=kb,
+        attachment_limits=AttachmentLimits(
+            per_file_bytes=10,
+            aggregate_bytes=20,
+            model_characters=5,
+        ),
+    ).run("PC-123", "fixture")
+
+    assert [(attachment.filename, attachment.status, attachment.reason) for attachment in run.attachments] == [
+        ("trace.log", "included", None),
+        ("manual.pdf", "excluded", "unsupported_file_type"),
+        ("large.log", "excluded", "per_file_limit_exceeded"),
+        ("source.js", "excluded", "model_package_limit_exceeded"),
+        ("prior.md", "excluded", "not_a_jira_attachment"),
+        ("missing.txt", "excluded", "missing_from_collection"),
+    ]
+    trace = next(attachment for attachment in run.attachments if attachment.filename == "trace.log")
+    assert trace.text == "timeo"
+    assert trace.truncated is True
+    assert kb.evidence_packages[0].attachments == (trace,)
+    assert jira.read_references == ["a-trace"]
+    report = run.report_path.read_text(encoding="utf-8")
+    assert "## Attachment Evidence" in report
+    assert "- trace.log [a-trace]: included excerpt (5 characters; truncated)" in report
+    assert "- manual.pdf [b-manual]: unsupported_file_type" in report
+    assert "- missing.txt: missing_from_collection" in report
+    record = json.loads((tmp_path / run.run_id / "run.json").read_text(encoding="utf-8"))
+    assert record["attachments"][0]["text"] == "timeo"
+    assert record["attachments"][-1]["status"] == "excluded"
+
+
+def test_attachment_evidence_respects_the_aggregate_byte_limit(tmp_path: Path) -> None:
+    jira = _FakeJiraIntelligence(
+        artifacts=(
+            ArtifactDescriptor("first", "jira_attachment", "first.log", "text/plain", 7),
+            ArtifactDescriptor("second", "jira_attachment", "second.log", "text/plain", 6),
+        ),
+        artifact_content={"first": b"first!!", "second": b"second"},
+    )
+    run = RcaWorkflow(
+        output_root=tmp_path,
+        jira_intelligence_client=jira,
+        knowledge_base=_FakeKnowledgeBase(),
+        attachment_limits=AttachmentLimits(
+            per_file_bytes=10,
+            aggregate_bytes=12,
+            model_characters=100,
+        ),
+    ).run("PC-123", "fixture")
+
+    assert [(attachment.filename, attachment.status, attachment.reason) for attachment in run.attachments] == [
+        ("first.log", "included", None),
+        ("second.log", "excluded", "aggregate_limit_exceeded"),
+    ]
+    assert jira.read_references == ["first"]
+
+
+def test_workflow_requests_attachment_download_and_retrieves_by_opaque_reference(tmp_path: Path) -> None:
+    requests: list[object] = []
+
+    def respond(request: object, max_bytes: int | None = None) -> bytes:
+        requests.append(request)
+        method = getattr(request, "method")
+        url = getattr(request, "full_url")
+        if method == "POST":
+            return json.dumps(
+                {
+                    "collection_run": {"id": "collection-123"},
+                    "normalized_issue": {
+                        "summary": "Policy binding fails",
+                        "components": [],
+                        "labels": [],
+                        "attachments": [
+                            {
+                                "id": "17",
+                                "filename": "trace.log",
+                                "mime_type": "text/plain",
+                                "size": 5,
+                            }
+                        ],
+                    },
+                }
+            ).encode("utf-8")
+        if url.endswith("/artifacts"):
+            return json.dumps(
+                {
+                    "artifacts": [
+                        {
+                            "reference": "jira-opaque-17",
+                            "kind": "jira_attachment",
+                            "filename": "trace.log",
+                            "mime_type": "text/plain",
+                            "size": 5,
+                        }
+                    ]
+                }
+            ).encode("utf-8")
+        return b"trace"
+
+    run = RcaWorkflow(
+        output_root=tmp_path,
+        jira_intelligence_client=JiraIntelligenceHttpClient(
+            "http://127.0.0.1:8001", request=respond, limited_request=respond
+        ),
+        knowledge_base=_FakeKnowledgeBase(),
+    ).run("PC-123", "fixture")
+
+    collection_request = requests[0]
+    assert json.loads(getattr(collection_request, "data").decode("utf-8")) == {
+        "download_attachments": True,
+        "orchestration_run_id": run.run_id,
+    }
+    assert next(attachment for attachment in run.attachments if attachment.filename == "trace.log").text == "trace"
+
+
 @dataclass
 class _FakeJiraIntelligence:
     requests: list[tuple[str, str]]
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        artifacts: tuple[ArtifactDescriptor, ...] = (),
+        artifact_content: dict[str, bytes] | None = None,
+        attachment_metadata: tuple[dict[str, object], ...] = (),
+    ) -> None:
         self.requests = []
+        self._artifacts = artifacts
+        self._artifact_content = artifact_content or {}
+        self._attachment_metadata = attachment_metadata
+        self.read_references: list[str] = []
 
     def collect_or_reuse(self, issue_key: str, rca_run_id: str) -> CollectionEvidence:
         self.requests.append((issue_key, rca_run_id))
@@ -293,11 +446,33 @@ class _FakeJiraIntelligence:
                 collection_run_id="collection-123",
                 confirmed_observations=("Summary: Policy binding fails", "Component: runtime"),
                 reported_claims=("Description: NullPointerException while binding",),
-                missing_evidence=("No Jira attachments were collected in Ticket 2.",),
+                missing_evidence=(),
                 components=("runtime",),
                 labels=("binding",),
             ),
+            attachment_metadata=tuple(
+                AttachmentMetadata(
+                    attachment_id=str(metadata["id"]),
+                    filename=str(metadata["filename"]),
+                    mime_type=metadata["mime_type"] if isinstance(metadata["mime_type"], str) else None,
+                    size=int(metadata["size"]),
+                )
+                for metadata in self._attachment_metadata
+            ),
         )
+
+    def list_artifacts(self, issue_key: str, collection_run_id: str) -> tuple[ArtifactDescriptor, ...]:
+        assert issue_key == "PC-123"
+        assert collection_run_id == "collection-123"
+        return self._artifacts
+
+    def read_artifact(
+        self, issue_key: str, collection_run_id: str, reference: str, max_bytes: int
+    ) -> bytes:
+        assert issue_key == "PC-123"
+        assert collection_run_id == "collection-123"
+        self.read_references.append(reference)
+        return self._artifact_content[reference]
 
 
 @dataclass
@@ -306,9 +481,11 @@ class _FakeKnowledgeBase:
 
     def __init__(self) -> None:
         self.product_versions = []
+        self.evidence_packages: list[EvidencePackage] = []
 
     def retrieve(self, evidence: EvidencePackage, product_version: str | None) -> KBSelection:
         self.product_versions.append(product_version)
+        self.evidence_packages.append(evidence)
         return KBSelection(
             kb_revision="pc-50.16.0-p1",
             version_applicability="unverified" if product_version is None else "not_verified",

@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .jira_intelligence import JiraIntelligenceHttpClient
 from .knowledge_base import ManifestKnowledgeBase
-from .workflow import RcaRun, RcaWorkflow
+from .workflow import AttachmentLimits, RcaRun, RcaWorkflow
 
 
 def _output_root(value: str | None) -> Path:
@@ -35,7 +35,35 @@ def _configured_workflow(output_root: Path) -> RcaWorkflow:
         output_root,
         jira_intelligence_client=JiraIntelligenceHttpClient(jira_intelligence_url),
         knowledge_base=ManifestKnowledgeBase(Path(kb_root)),
+        attachment_limits=_attachment_limits_from_environment(),
     )
+
+
+def _attachment_limits_from_environment() -> AttachmentLimits:
+    return AttachmentLimits(
+        per_file_bytes=_positive_environment_integer(
+            "RCA_ORCHESTRATOR_ATTACHMENT_PER_FILE_BYTES", 2 * 1024 * 1024
+        ),
+        aggregate_bytes=_positive_environment_integer(
+            "RCA_ORCHESTRATOR_ATTACHMENT_AGGREGATE_BYTES", 8 * 1024 * 1024
+        ),
+        model_characters=_positive_environment_integer(
+            "RCA_ORCHESTRATOR_ATTACHMENT_MODEL_CHARACTERS", 200_000
+        ),
+    )
+
+
+def _positive_environment_integer(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise ValueError(f"{name} must be a positive integer") from error
+    if parsed <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return parsed
 
 
 def run_main() -> None:

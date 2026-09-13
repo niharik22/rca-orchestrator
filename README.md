@@ -32,3 +32,27 @@ The KB must begin with `manifest.yaml`. Its domains are a list (or mapping) of
 `passages` list of relative Markdown paths. RCA deterministically selects at
 most three matching domains and six cited passages, and rejects any path that
 escapes the configured KB root.
+
+## Attachment Evidence
+
+Jira Intelligence downloads the issue attachments and serves them through
+opaque loopback artifact references. RCA can admit only `.txt`, `.log`,
+`.json`, `.xml`, `.csv`, `.md`, `.js`, `.yaml`, and `.yml` files. All other
+artifacts, unavailable attachments, and those outside the limits are recorded
+as unanalysed evidence in the local run record and report.
+
+The defaults are 2 MiB per file, 8 MiB total, and 200,000 text characters for
+the model-facing excerpts. Change them for a demo session without committing
+local settings:
+
+```sh
+export RCA_ORCHESTRATOR_ATTACHMENT_PER_FILE_BYTES=2097152
+export RCA_ORCHESTRATOR_ATTACHMENT_AGGREGATE_BYTES=8388608
+export RCA_ORCHESTRATOR_ATTACHMENT_MODEL_CHARACTERS=200000
+```
+
+```powershell
+$env:RCA_ORCHESTRATOR_ATTACHMENT_PER_FILE_BYTES = "2097152"
+$env:RCA_ORCHESTRATOR_ATTACHMENT_AGGREGATE_BYTES = "8388608"
+$env:RCA_ORCHESTRATOR_ATTACHMENT_MODEL_CHARACTERS = "200000"
+```

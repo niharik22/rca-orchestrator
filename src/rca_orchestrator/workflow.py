@@ -8,8 +8,8 @@ from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
 
-from .evidence import CollectionEvidence, EvidencePackage
-from .jira_intelligence import JiraIntelligenceClient, JiraIntelligenceError
+from .evidence import AttachmentEvidence, AttachmentMetadata, CollectionEvidence, EvidencePackage
+from .jira_intelligence import ArtifactDescriptor, JiraIntelligenceClient, JiraIntelligenceError
 from .knowledge_base import KBPassage, KBSelection, KnowledgeBase, KnowledgeBaseError
 
 
@@ -37,6 +37,22 @@ _FIXTURE_NEXT_STATES = {
     "awaiting_decision": "completed",
 }
 _TERMINAL_STATES = frozenset({"blocked", "completed"})
+_ALLOWED_ATTACHMENT_SUFFIXES = frozenset(
+    {".txt", ".log", ".json", ".xml", ".csv", ".md", ".js", ".yaml", ".yml"}
+)
+
+
+@dataclass(frozen=True)
+class AttachmentLimits:
+    """The bounded attachment evidence budget for one RCA Run."""
+
+    per_file_bytes: int = 2 * 1024 * 1024
+    aggregate_bytes: int = 8 * 1024 * 1024
+    model_characters: int = 200_000
+
+    def __post_init__(self) -> None:
+        if self.per_file_bytes <= 0 or self.aggregate_bytes <= 0 or self.model_characters <= 0:
+            raise ValueError("Attachment evidence limits must be positive.")
 
 
 @dataclass(frozen=True)
@@ -66,6 +82,8 @@ class RcaRun:
     product_version: str | None = None
     kb_version_applicability: str = "unverified"
     blocked_reason: str | None = None
+    attachment_metadata: tuple[AttachmentMetadata, ...] = ()
+    attachments: tuple[AttachmentEvidence, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -120,6 +138,14 @@ class _DefaultFixtureJiraIntelligence:
                 labels=(),
             ),
         )
+
+    def list_artifacts(self, issue_key: str, collection_run_id: str) -> tuple[ArtifactDescriptor, ...]:
+        return ()
+
+    def read_artifact(
+        self, issue_key: str, collection_run_id: str, reference: str, max_bytes: int
+    ) -> bytes:
+        raise JiraIntelligenceError("Fixture Jira Intelligence has no Attachment Evidence.")
 
 
 class _DefaultFixtureKnowledgeBase:
@@ -190,6 +216,10 @@ class _LocalRunStore:
             product_version=record.get("product_version"),
             kb_version_applicability=record.get("kb_version_applicability", "unverified"),
             blocked_reason=record.get("blocked_reason"),
+            attachment_metadata=tuple(
+                AttachmentMetadata(**metadata) for metadata in record.get("attachment_metadata", ())
+            ),
+            attachments=tuple(AttachmentEvidence(**attachment) for attachment in record.get("attachments", ())),
         )
 
     def save(self, run: RcaRun) -> None:
@@ -227,6 +257,28 @@ class _LocalRunStore:
             "product_version": run.product_version,
             "kb_version_applicability": run.kb_version_applicability,
             "blocked_reason": run.blocked_reason,
+            "attachment_metadata": [
+                {
+                    "attachment_id": metadata.attachment_id,
+                    "filename": metadata.filename,
+                    "mime_type": metadata.mime_type,
+                    "size": metadata.size,
+                }
+                for metadata in run.attachment_metadata
+            ],
+            "attachments": [
+                {
+                    "reference": attachment.reference,
+                    "filename": attachment.filename,
+                    "mime_type": attachment.mime_type,
+                    "size": attachment.size,
+                    "status": attachment.status,
+                    "reason": attachment.reason,
+                    "text": attachment.text,
+                    "truncated": attachment.truncated,
+                }
+                for attachment in run.attachments
+            ],
         }
         (run_directory / "run.json").write_text(
             json.dumps(record, indent=2) + "\n", encoding="utf-8"
@@ -244,6 +296,7 @@ class RcaWorkflow:
         fixture_runner: FixtureRunner | None = None,
         jira_intelligence_client: JiraIntelligenceClient | None = None,
         knowledge_base: KnowledgeBase | None = None,
+        attachment_limits: AttachmentLimits | None = None,
     ) -> None:
         if run_store is None:
             if output_root is None:
@@ -253,6 +306,7 @@ class RcaWorkflow:
         self._fixture_runner = fixture_runner or _DefaultFixtureRunner()
         self._jira_intelligence_client = jira_intelligence_client or _DefaultFixtureJiraIntelligence()
         self._knowledge_base = knowledge_base or _DefaultFixtureKnowledgeBase()
+        self._attachment_limits = attachment_limits or AttachmentLimits()
 
     def run(self, issue_key: str, model: str, product_version: str | None = None) -> RcaRun:
         """Start and finish one Fixture Runner RCA Run using collected evidence."""
@@ -297,9 +351,11 @@ class RcaWorkflow:
                 missing_evidence=collection.evidence.missing_evidence,
                 components=collection.evidence.components,
                 labels=collection.evidence.labels,
+                attachment_metadata=collection.attachment_metadata,
             )
             run = self._advance(run)
         if run.state == "collected":
+            run = replace(run, attachments=self._collect_attachment_evidence(run))
             run = self._advance(run)
         if run.state == "evidence_ready":
             try:
@@ -342,7 +398,104 @@ class RcaWorkflow:
             missing_evidence=run.missing_evidence,
             components=run.components,
             labels=run.labels,
+            attachments=tuple(attachment for attachment in run.attachments if attachment.status == "included"),
         )
+
+    def _collect_attachment_evidence(self, run: RcaRun) -> tuple[AttachmentEvidence, ...]:
+        collection_run_id = _required_collection_run_id(run)
+        try:
+            artifacts = self._jira_intelligence_client.list_artifacts(run.issue_key, collection_run_id)
+        except JiraIntelligenceError:
+            if run.attachment_metadata:
+                return tuple(
+                    AttachmentEvidence(
+                        reference=None,
+                        filename=metadata.filename,
+                        mime_type=metadata.mime_type,
+                        size=metadata.size,
+                        status="excluded",
+                        reason="inventory_unavailable",
+                    )
+                    for metadata in run.attachment_metadata
+                )
+            return (
+                AttachmentEvidence(
+                    reference=None,
+                    filename="Attachment inventory",
+                    mime_type=None,
+                    size=0,
+                    status="excluded",
+                    reason="inventory_unavailable",
+                ),
+            )
+
+        used_metadata_indexes: set[int] = set()
+        attachments: list[AttachmentEvidence] = []
+        aggregate_bytes = 0
+        model_characters = 0
+        for artifact in sorted(artifacts, key=lambda descriptor: descriptor.reference):
+            matching_metadata = _matching_metadata_index(
+                run.attachment_metadata, used_metadata_indexes, artifact
+            )
+            if matching_metadata is not None:
+                used_metadata_indexes.add(matching_metadata)
+            excluded_reason = _artifact_exclusion_reason(artifact, self._attachment_limits, aggregate_bytes)
+            if excluded_reason is not None:
+                attachments.append(_excluded_attachment(artifact, excluded_reason))
+                continue
+            remaining_characters = self._attachment_limits.model_characters - model_characters
+            if remaining_characters <= 0:
+                attachments.append(_excluded_attachment(artifact, "model_package_limit_exceeded"))
+                continue
+            try:
+                content = self._jira_intelligence_client.read_artifact(
+                    run.issue_key,
+                    collection_run_id,
+                    artifact.reference,
+                    self._attachment_limits.per_file_bytes,
+                )
+            except JiraIntelligenceError:
+                attachments.append(_excluded_attachment(artifact, "unavailable"))
+                continue
+            if len(content) > self._attachment_limits.per_file_bytes:
+                attachments.append(_excluded_attachment(artifact, "per_file_limit_exceeded"))
+                continue
+            if aggregate_bytes + len(content) > self._attachment_limits.aggregate_bytes:
+                attachments.append(_excluded_attachment(artifact, "aggregate_limit_exceeded"))
+                continue
+            try:
+                text = content.decode("utf-8")
+            except UnicodeDecodeError:
+                attachments.append(_excluded_attachment(artifact, "not_utf8_text"))
+                continue
+            excerpt = text[:remaining_characters]
+            attachments.append(
+                AttachmentEvidence(
+                    reference=artifact.reference,
+                    filename=artifact.filename,
+                    mime_type=artifact.mime_type,
+                    size=len(content),
+                    status="included",
+                    text=excerpt,
+                    truncated=len(excerpt) < len(text),
+                )
+            )
+            aggregate_bytes += len(content)
+            model_characters += len(excerpt)
+
+        for index, metadata in enumerate(run.attachment_metadata):
+            if index not in used_metadata_indexes:
+                attachments.append(
+                    AttachmentEvidence(
+                        reference=None,
+                        filename=metadata.filename,
+                        mime_type=metadata.mime_type,
+                        size=metadata.size,
+                        status="excluded",
+                        reason="missing_from_collection",
+                    )
+                )
+        return tuple(attachments)
 
     def _advance(self, run: RcaRun) -> RcaRun:
         try:
@@ -384,6 +537,7 @@ class RcaWorkflow:
                     for passage in run.kb_passages
                 ),
             )
+            + _attachment_markdown(run.attachments)
             +
             "## Hypotheses\n\n"
             "- Fixture hypothesis: confirm the live evidence before accepting this Hypothesis.\n\n"
@@ -414,3 +568,69 @@ def _required_collection_run_id(run: RcaRun) -> str:
     if run.collection_run_id is None:
         raise WorkflowTransitionError("Evidence Package requires a Collection Run.")
     return run.collection_run_id
+
+
+def _matching_metadata_index(
+    metadata: tuple[AttachmentMetadata, ...],
+    used_indexes: set[int],
+    artifact: ArtifactDescriptor,
+) -> int | None:
+    for index, candidate in enumerate(metadata):
+        if index not in used_indexes and (
+            candidate.filename,
+            candidate.mime_type,
+            candidate.size,
+        ) == (artifact.filename, artifact.mime_type, artifact.size):
+            return index
+    return None
+
+
+def _artifact_exclusion_reason(
+    artifact: ArtifactDescriptor, limits: AttachmentLimits, aggregate_bytes: int
+) -> str | None:
+    if artifact.kind != "jira_attachment":
+        return "not_a_jira_attachment"
+    if Path(artifact.filename).suffix.lower() not in _ALLOWED_ATTACHMENT_SUFFIXES:
+        return "unsupported_file_type"
+    if artifact.size > limits.per_file_bytes:
+        return "per_file_limit_exceeded"
+    if aggregate_bytes + artifact.size > limits.aggregate_bytes:
+        return "aggregate_limit_exceeded"
+    return None
+
+
+def _excluded_attachment(artifact: ArtifactDescriptor, reason: str) -> AttachmentEvidence:
+    return AttachmentEvidence(
+        reference=artifact.reference,
+        filename=artifact.filename,
+        mime_type=artifact.mime_type,
+        size=artifact.size,
+        status="excluded",
+        reason=reason,
+    )
+
+
+def _attachment_markdown(attachments: tuple[AttachmentEvidence, ...]) -> str:
+    used = tuple(attachment for attachment in attachments if attachment.status == "included")
+    excluded = tuple(attachment for attachment in attachments if attachment.status == "excluded")
+    return (
+        "## Attachment Evidence\n\n"
+        + _markdown_list("Attachment Evidence used", tuple(_used_attachment_line(attachment) for attachment in used))
+        + _markdown_list(
+            "Attachment Evidence unanalysed",
+            tuple(_excluded_attachment_line(attachment) for attachment in excluded),
+        )
+    )
+
+
+def _used_attachment_line(attachment: AttachmentEvidence) -> str:
+    truncation = "; truncated" if attachment.truncated else ""
+    return (
+        f"{attachment.filename} [{attachment.reference}]: included excerpt "
+        f"({len(attachment.text or '')} characters{truncation})"
+    )
+
+
+def _excluded_attachment_line(attachment: AttachmentEvidence) -> str:
+    reference = f" [{attachment.reference}]" if attachment.reference is not None else ""
+    return f"{attachment.filename}{reference}: {attachment.reason}"
