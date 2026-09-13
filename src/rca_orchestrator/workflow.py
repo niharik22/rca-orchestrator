@@ -11,6 +11,7 @@ from uuid import uuid4
 from .evidence import AttachmentEvidence, AttachmentMetadata, CollectionEvidence, EvidencePackage
 from .jira_intelligence import ArtifactDescriptor, JiraIntelligenceClient, JiraIntelligenceError
 from .knowledge_base import KBPassage, KBSelection, KnowledgeBase, KnowledgeBaseError
+from .model_runner import CopilotCliRunner, Evaluation, Hypothesis, ModelRunner, ModelRunnerError, RcaDraft, parse_analyst_output, parse_evaluator_output
 
 
 class WorkflowTransitionError(ValueError):
@@ -84,6 +85,14 @@ class RcaRun:
     blocked_reason: str | None = None
     attachment_metadata: tuple[AttachmentMetadata, ...] = ()
     attachments: tuple[AttachmentEvidence, ...] = ()
+    analyst_draft: RcaDraft | None = None
+    evaluation: Evaluation | None = None
+    analyst_prompt: str | None = None
+    evaluator_prompt: str | None = None
+    analyst_raw_output: str | None = None
+    evaluator_raw_output: str | None = None
+    analyst_model: str | None = None
+    evaluator_model: str | None = None
 
 
 @dataclass(frozen=True)
@@ -220,6 +229,14 @@ class _LocalRunStore:
                 AttachmentMetadata(**metadata) for metadata in record.get("attachment_metadata", ())
             ),
             attachments=tuple(AttachmentEvidence(**attachment) for attachment in record.get("attachments", ())),
+            analyst_draft=_draft_from_record(record.get("analyst_draft")),
+            evaluation=_evaluation_from_record(record.get("evaluation")),
+            analyst_prompt=_invocation_value(record, "analyst", "prompt"),
+            evaluator_prompt=_invocation_value(record, "evaluator", "prompt"),
+            analyst_raw_output=_invocation_value(record, "analyst", "raw_output"),
+            evaluator_raw_output=_invocation_value(record, "evaluator", "raw_output"),
+            analyst_model=_invocation_value(record, "analyst", "model"),
+            evaluator_model=_invocation_value(record, "evaluator", "model"),
         )
 
     def save(self, run: RcaRun) -> None:
@@ -279,6 +296,12 @@ class _LocalRunStore:
                 }
                 for attachment in run.attachments
             ],
+            "analyst_draft": _draft_record(run.analyst_draft),
+            "evaluation": _evaluation_record(run.evaluation),
+            "model_invocations": {
+                "analyst": _invocation_record(run.analyst_model, run.analyst_prompt, run.analyst_raw_output),
+                "evaluator": _invocation_record(run.evaluator_model, run.evaluator_prompt, run.evaluator_raw_output),
+            },
         }
         (run_directory / "run.json").write_text(
             json.dumps(record, indent=2) + "\n", encoding="utf-8"
@@ -294,6 +317,7 @@ class RcaWorkflow:
         *,
         run_store: RunStore | None = None,
         fixture_runner: FixtureRunner | None = None,
+        model_runner: ModelRunner | None = None,
         jira_intelligence_client: JiraIntelligenceClient | None = None,
         knowledge_base: KnowledgeBase | None = None,
         attachment_limits: AttachmentLimits | None = None,
@@ -307,13 +331,16 @@ class RcaWorkflow:
         self._jira_intelligence_client = jira_intelligence_client or _DefaultFixtureJiraIntelligence()
         self._knowledge_base = knowledge_base or _DefaultFixtureKnowledgeBase()
         self._attachment_limits = attachment_limits or AttachmentLimits()
+        self._model_runner = model_runner or CopilotCliRunner()
 
     def run(self, issue_key: str, model: str, product_version: str | None = None) -> RcaRun:
         """Start and finish one Fixture Runner RCA Run using collected evidence."""
-        if model != "fixture":
-            raise ValueError("Ticket 2 supports only the explicit fixture model")
+        if model not in {"fixture", "copilot"}:
+            raise ValueError("model must be fixture or copilot")
         if not issue_key.strip():
             raise ValueError("issue_key must not be empty")
+        if model == "copilot":
+            self._model_runner.preflight()
         return self._continue_fixture_run(
             self._store.create(
                 issue_key,
@@ -327,8 +354,8 @@ class RcaWorkflow:
         """Continue a saved Fixture Runner run without repeating saved stages."""
         run = self._store.load(run_id)
         self._validate_history(run)
-        if run.model != "fixture":
-            raise ValueError("Ticket 2 can resume only fixture runs")
+        if run.model not in {"fixture", "copilot"}:
+            raise ValueError("RCA Run has an unsupported model")
         return self._continue_fixture_run(run, run.product_version)
 
     def get(self, run_id: str) -> RcaRun:
@@ -371,6 +398,31 @@ class RcaWorkflow:
                 product_version=product_version,
                 kb_version_applicability=selection.version_applicability,
             )
+            run = self._advance(run)
+        if run.state == "kb_ready" and run.model == "copilot":
+            try:
+                invocation = self._model_runner.run_analyst(
+                    self._evidence_from(run), run.kb_passages, product_version, run.kb_version_applicability
+                )
+                draft = parse_analyst_output(invocation.raw_output, self._evidence_from(run), run.kb_passages)
+            except ModelRunnerError as error:
+                return self._block(run, str(error))
+            run = replace(run, analyst_draft=draft, analyst_model=invocation.model, analyst_prompt=invocation.prompt,
+                          analyst_raw_output=invocation.raw_output, model_prompt=invocation.prompt)
+            run = self._advance(run)
+        if run.state == "drafted" and run.model == "copilot":
+            if run.analyst_draft is None:
+                return self._block(run, "RCA Run has no persisted Analyst draft.")
+            try:
+                invocation = self._model_runner.run_evaluator(
+                    run.analyst_draft, self._evidence_from(run), run.kb_passages,
+                    product_version, run.kb_version_applicability,
+                )
+                evaluation = parse_evaluator_output(invocation.raw_output)
+            except ModelRunnerError as error:
+                return self._block(run, str(error))
+            run = replace(run, evaluation=evaluation, evaluation_result=evaluation.result, evaluator_model=invocation.model,
+                          evaluator_prompt=invocation.prompt, evaluator_raw_output=invocation.raw_output)
             run = self._advance(run)
         while run.state not in _TERMINAL_STATES:
             run = self._advance(run)
@@ -524,6 +576,9 @@ class RcaWorkflow:
                 )
 
     def _render_report(self, run: RcaRun) -> None:
+        if run.model == "copilot":
+            self._render_live_report(run)
+            return
         run.report_path.write_text(
             "# RCA Report: " + run.issue_key + "\n\n"
             "## Outcome and confidence\n\n"
@@ -554,6 +609,35 @@ class RcaWorkflow:
             f"- KB version applicability: {run.kb_version_applicability}\n"
             f"- Prompt: {run.model_prompt}\n"
             f"- Evaluation Result: {run.evaluation_result}\n"
+            "- Writeback Decision: not requested\n",
+            encoding="utf-8",
+        )
+
+    def _render_live_report(self, run: RcaRun) -> None:
+        assert run.analyst_draft is not None
+        assert run.evaluation is not None
+        hypotheses = tuple(
+            f"{item.title} (confidence {item.confidence:.2f}; supports: {', '.join(item.supporting_evidence)}; "
+            f"contradicts: {', '.join(item.contradicting_evidence) or 'none'}; unknowns: {', '.join(item.unknowns) or 'none'})"
+            for item in run.analyst_draft.hypotheses
+        )
+        run.report_path.write_text(
+            "# RCA Report: " + run.issue_key + "\n\n"
+            "## Outcome and confidence\n\n"
+            f"Evaluation Result: {run.evaluation.result}.\n"
+            f"KB version applicability: {run.kb_version_applicability}.\n\n"
+            + _markdown_list("Jira observations", run.confirmed_observations)
+            + _markdown_list("Reported but unverified claims", run.reported_claims)
+            + _markdown_list("KB guidance and citations", tuple(f"[{item.citation_id}] {item.relative_path}: {item.text.splitlines()[0]}" for item in run.kb_passages))
+            + _attachment_markdown(run.attachments)
+            + _markdown_list("Hypotheses", hypotheses)
+            + _markdown_list("Unknowns and missing evidence", (*run.missing_evidence, *run.analyst_draft.unknowns, *run.evaluation.unknowns))
+            + _markdown_list("Evaluation evidence gaps and contradictions", (*run.evaluation.citation_gaps, *run.evaluation.contradictions))
+            + _markdown_list("Next actions", run.analyst_draft.recommended_actions)
+            + "## Provenance\n\n"
+            f"- RCA Run: {run.run_id}\n- Model Runner: {run.model}\n- Collection Run: {run.collection_run_id}\n"
+            f"- KB revision: {run.kb_revision}\n- Product Version: {run.product_version or 'not provided'}\n"
+            f"- KB version applicability: {run.kb_version_applicability}\n- Evaluation Result: {run.evaluation.result}\n"
             "- Writeback Decision: not requested\n",
             encoding="utf-8",
         )
@@ -634,3 +718,50 @@ def _used_attachment_line(attachment: AttachmentEvidence) -> str:
 def _excluded_attachment_line(attachment: AttachmentEvidence) -> str:
     reference = f" [{attachment.reference}]" if attachment.reference is not None else ""
     return f"{attachment.filename}{reference}: {attachment.reason}"
+
+
+def _draft_record(draft: RcaDraft | None) -> dict[str, object] | None:
+    if draft is None:
+        return None
+    return {"hypotheses": [{"title": item.title, "supporting_evidence": list(item.supporting_evidence), "contradicting_evidence": list(item.contradicting_evidence), "unknowns": list(item.unknowns), "confidence": item.confidence} for item in draft.hypotheses], "most_likely_explanation": draft.most_likely_explanation, "unknowns": list(draft.unknowns), "recommended_actions": list(draft.recommended_actions)}
+
+
+def _draft_from_record(record: object) -> RcaDraft | None:
+    if not isinstance(record, dict):
+        return None
+    try:
+        return RcaDraft(tuple(Hypothesis(title=item["title"], supporting_evidence=tuple(item["supporting_evidence"]), contradicting_evidence=tuple(item["contradicting_evidence"]), unknowns=tuple(item["unknowns"]), confidence=float(item["confidence"])) for item in record["hypotheses"]), record.get("most_likely_explanation"), tuple(record["unknowns"]), tuple(record["recommended_actions"]))
+    except (KeyError, TypeError, ValueError):
+        raise WorkflowTransitionError("RCA Run has an invalid persisted Analyst draft.") from None
+
+
+def _evaluation_record(evaluation: Evaluation | None) -> dict[str, object] | None:
+    if evaluation is None:
+        return None
+    return {"result": evaluation.result, "citation_gaps": list(evaluation.citation_gaps), "contradictions": list(evaluation.contradictions), "unknowns": list(evaluation.unknowns), "rationale": evaluation.rationale}
+
+
+def _evaluation_from_record(record: object) -> Evaluation | None:
+    if not isinstance(record, dict):
+        return None
+    try:
+        return Evaluation(record["result"], tuple(record["citation_gaps"]), tuple(record["contradictions"]), tuple(record["unknowns"]), record["rationale"])
+    except (KeyError, TypeError):
+        raise WorkflowTransitionError("RCA Run has an invalid persisted Evaluation.") from None
+
+
+def _invocation_record(model: str | None, prompt: str | None, raw_output: str | None) -> dict[str, str] | None:
+    if model is None or prompt is None or raw_output is None:
+        return None
+    return {"model": model, "prompt": prompt, "raw_output": raw_output}
+
+
+def _invocation_value(record: dict[str, object], role: str, field: str) -> str | None:
+    invocations = record.get("model_invocations")
+    if not isinstance(invocations, dict):
+        return None
+    invocation = invocations.get(role)
+    if not isinstance(invocation, dict):
+        return None
+    value = invocation.get(field)
+    return value if isinstance(value, str) else None

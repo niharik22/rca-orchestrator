@@ -39,6 +39,21 @@ def test_attachment_evidence_limits_can_be_configured_from_the_environment(tmp_p
     assert "RCA_ORCHESTRATOR_ATTACHMENT_PER_FILE_BYTES must be a positive integer" in started.stderr
 
 
+def test_copilot_preflight_failure_is_reported_without_falling_back_to_fixture(tmp_path: Path) -> None:
+    started = _run(
+        "rca-run", "PC-123", "--model", "copilot", "--output-root", str(tmp_path),
+        environment={
+            "RCA_ORCHESTRATOR_JIRA_INTELLIGENCE_URL": "http://127.0.0.1:8001",
+            "RCA_ORCHESTRATOR_KB_ROOT": str(tmp_path / "kb"),
+            "RCA_ORCHESTRATOR_COPILOT_COMMAND": "missing-copilot-for-test",
+        },
+    )
+
+    assert started.returncode == 2
+    assert "Copilot CLI is unavailable" in started.stderr
+    assert "Fixture Runner" not in started.stderr
+
+
 def _run(
     command: str, *arguments: str, environment: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:

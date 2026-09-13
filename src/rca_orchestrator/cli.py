@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .jira_intelligence import JiraIntelligenceHttpClient
 from .knowledge_base import ManifestKnowledgeBase
+from .model_runner import CopilotCliRunner, ModelRunnerError
 from .workflow import AttachmentLimits, RcaRun, RcaWorkflow
 
 
@@ -36,6 +37,10 @@ def _configured_workflow(output_root: Path) -> RcaWorkflow:
         jira_intelligence_client=JiraIntelligenceHttpClient(jira_intelligence_url),
         knowledge_base=ManifestKnowledgeBase(Path(kb_root)),
         attachment_limits=_attachment_limits_from_environment(),
+        model_runner=CopilotCliRunner(
+            executable=os.environ.get("RCA_ORCHESTRATOR_COPILOT_COMMAND", "copilot"),
+            model=os.environ.get("RCA_ORCHESTRATOR_COPILOT_MODEL"),
+        ),
     )
 
 
@@ -70,7 +75,7 @@ def run_main() -> None:
     parser = argparse.ArgumentParser(prog="rca-run")
     parser.add_argument("issue_key", nargs="?")
     parser.add_argument("--resume", metavar="RCA_RUN_ID")
-    parser.add_argument("--model", choices=("fixture",))
+    parser.add_argument("--model", choices=("fixture", "copilot"))
     parser.add_argument("--output-root")
     parser.add_argument("--product-version")
     arguments = parser.parse_args()
@@ -85,13 +90,13 @@ def run_main() -> None:
 
     try:
         workflow = _configured_workflow(_output_root(arguments.output_root))
-    except ValueError as error:
+        run = (
+            workflow.resume(arguments.resume)
+            if arguments.resume
+            else workflow.run(arguments.issue_key, arguments.model, arguments.product_version)
+        )
+    except (ModelRunnerError, ValueError) as error:
         parser.error(str(error))
-    run = (
-        workflow.resume(arguments.resume)
-        if arguments.resume
-        else workflow.run(arguments.issue_key, arguments.model, arguments.product_version)
-    )
     _print_run(run)
 
 

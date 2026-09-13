@@ -56,3 +56,26 @@ $env:RCA_ORCHESTRATOR_ATTACHMENT_PER_FILE_BYTES = "2097152"
 $env:RCA_ORCHESTRATOR_ATTACHMENT_AGGREGATE_BYTES = "8388608"
 $env:RCA_ORCHESTRATOR_ATTACHMENT_MODEL_CHARACTERS = "200000"
 ```
+
+## Live Copilot mode
+
+Install and authenticate GitHub Copilot CLI on the work laptop first:
+
+```powershell
+winget install GitHub.Copilot
+copilot login
+```
+
+Then select live analysis explicitly. This invokes a bounded Analyst prompt and
+a separate Evaluator prompt; it never falls back to fixture output.
+
+```powershell
+uv run rca-run PC-123 --model copilot
+```
+
+To pin an available Copilot model or use a non-default command location for a
+demo session, set `RCA_ORCHESTRATOR_COPILOT_MODEL` or
+`RCA_ORCHESTRATOR_COPILOT_COMMAND`. The orchestrator invokes Copilot with its
+available tools, built-in MCPs, custom instructions, and remote session access
+disabled. It provides the prompt through standard input and retains the prompt
+and raw structured output only in the local RCA Run record.
