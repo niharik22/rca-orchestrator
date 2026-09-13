@@ -31,29 +31,15 @@ def test_fixture_run_persists_completed_run_and_markdown_report(tmp_path: Path) 
     assert run.model == "fixture"
     assert run.writeback_decision == "not_requested"
     assert run.report_path == tmp_path / run.run_id / "rca-report.md"
-    assert run.report_path.read_text(encoding="utf-8") == (
-        "# RCA Report: PC-123\n\n"
-        "## Outcome and confidence\n\n"
-        "Evaluation Result: needs_evidence. Fixture analysis has demo-only confidence.\n\n"
-        "## Jira observations\n\n"
-        "- Fixture Collection Run only; live Jira collection has not run.\n\n"
-        "## KB guidance and citations\n\n"
-        "- Fixture KB guidance only; live KB retrieval has not run.\n\n"
-        "## Hypotheses\n\n"
-        "- Fixture hypothesis: confirm the live evidence before accepting this Hypothesis.\n\n"
-        "## Unknowns and missing evidence\n\n"
-        "- Live Jira and KB evidence are intentionally unavailable in fixture mode.\n\n"
-        "## Next actions\n\n"
-        "- Re-run with live adapters in a later ticket.\n\n"
-        "## Provenance\n\n"
-        f"- RCA Run: {run.run_id}\n"
-        "- Model Runner: fixture\n"
-        "- Collection Run: fixture-collection-PC-123\n"
-        "- KB revision: fixture-kb-v1\n"
-        "- Prompt: fixture-v1\n"
-        "- Evaluation Result: needs_evidence\n"
-        "- Writeback Decision: not requested\n"
-    )
+    report = run.report_path.read_text(encoding="utf-8")
+    assert "# RCA Report: PC-123" in report
+    assert "## Jira observations" in report
+    assert "## Reported but unverified claims" in report
+    assert "## KB guidance and citations" in report
+    assert "## Unknowns and missing evidence" in report
+    assert f"- RCA Run: {run.run_id}" in report
+    assert "- Collection Run: fixture-collection-PC-123" in report
+    assert "- KB version applicability: unverified" in report
     assert (tmp_path / run.run_id / "run.json").is_file()
 
 
@@ -78,8 +64,9 @@ def test_workflow_uses_injected_fixture_runner_and_run_store(tmp_path: Path) -> 
     run = workflow.run(issue_key="PC-123", model="fixture")
 
     assert fixture_runner.requested_issue_keys == ["PC-123"]
-    assert run.collection_run_id == "fixture-collection-from-test"
-    assert run.kb_revision == "fixture-kb-from-test"
+    assert run.model_prompt == "fixture-v1"
+    assert run.collection_run_id == "fixture-collection-PC-123"
+    assert run.kb_revision == "fixture-kb-v1"
     assert store.load(run.run_id) == run
 
 

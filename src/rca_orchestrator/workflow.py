@@ -8,16 +8,20 @@ from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
 
+from .evidence import CollectionEvidence, EvidencePackage
+from .jira_intelligence import JiraIntelligenceClient, JiraIntelligenceError
+from .knowledge_base import KBPassage, KBSelection, KnowledgeBase, KnowledgeBaseError
+
 
 class WorkflowTransitionError(ValueError):
     """Raised when a persisted RCA Run contains an illegal state change."""
 
 
 _ALLOWED_NEXT_STATES = {
-    "created": frozenset({"collected"}),
-    "collected": frozenset({"evidence_ready"}),
-    "evidence_ready": frozenset({"kb_ready"}),
-    "kb_ready": frozenset({"drafted"}),
+    "created": frozenset({"collected", "blocked"}),
+    "collected": frozenset({"evidence_ready", "blocked"}),
+    "evidence_ready": frozenset({"kb_ready", "blocked"}),
+    "kb_ready": frozenset({"drafted", "blocked"}),
     "drafted": frozenset({"evaluated"}),
     "evaluated": frozenset({"awaiting_decision"}),
     "awaiting_decision": frozenset({"completed"}),
@@ -32,7 +36,7 @@ _FIXTURE_NEXT_STATES = {
     "evaluated": "awaiting_decision",
     "awaiting_decision": "completed",
 }
-_TERMINAL_STATES = frozenset({"completed"})
+_TERMINAL_STATES = frozenset({"blocked", "completed"})
 
 
 @dataclass(frozen=True)
@@ -49,9 +53,19 @@ class RcaRun:
     collection_run_id: str
     kb_revision: str
     kb_passage_ids: tuple[str, ...]
-    evaluation_result: str
+    evaluation_result: str | None
     model_prompt: str
     jira_event_ids: tuple[str, ...]
+    confirmed_observations: tuple[str, ...] = ()
+    reported_claims: tuple[str, ...] = ()
+    missing_evidence: tuple[str, ...] = ()
+    components: tuple[str, ...] = ()
+    labels: tuple[str, ...] = ()
+    kb_domains: tuple[str, ...] = ()
+    kb_passages: tuple[KBPassage, ...] = ()
+    product_version: str | None = None
+    kb_version_applicability: str = "unverified"
+    blocked_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -93,6 +107,36 @@ class _DefaultFixtureRunner:
             evaluation_result="needs_evidence",
             model_prompt="fixture-v1",
             jira_event_ids=(),
+        )
+
+
+class _DefaultFixtureJiraIntelligence:
+    """Local-only evidence for direct workflow use; the CLI injects Jira Intelligence."""
+
+    def collect_or_reuse(self, issue_key: str, rca_run_id: str) -> CollectionEvidence:
+        collection_run_id = f"fixture-collection-{issue_key}"
+        return CollectionEvidence(
+            collection_run_id=collection_run_id,
+            evidence=EvidencePackage(
+                collection_run_id=collection_run_id,
+                confirmed_observations=("Fixture Collection Run only; live Jira collection has not run.",),
+                reported_claims=(),
+                missing_evidence=("Live Jira evidence is intentionally unavailable in fixture mode.",),
+                components=(),
+                labels=(),
+            ),
+        )
+
+
+class _DefaultFixtureKnowledgeBase:
+    """Local-only guidance for direct workflow use; the CLI injects the configured KB."""
+
+    def retrieve(self, evidence: EvidencePackage, product_version: str | None) -> KBSelection:
+        return KBSelection(
+            kb_revision="fixture-kb-v1",
+            version_applicability="unverified" if product_version is None else "not_verified",
+            domain_ids=(),
+            passages=(),
         )
 
 
@@ -142,6 +186,16 @@ class _LocalRunStore:
             evaluation_result=record["evaluation_result"],
             model_prompt=record["model_prompt"],
             jira_event_ids=tuple(record["jira_event_ids"]),
+            confirmed_observations=tuple(record.get("confirmed_observations", ())),
+            reported_claims=tuple(record.get("reported_claims", ())),
+            missing_evidence=tuple(record.get("missing_evidence", ())),
+            components=tuple(record.get("components", ())),
+            labels=tuple(record.get("labels", ())),
+            kb_domains=tuple(record.get("kb_domains", ())),
+            kb_passages=tuple(KBPassage(**passage) for passage in record.get("kb_passages", ())),
+            product_version=record.get("product_version"),
+            kb_version_applicability=record.get("kb_version_applicability", "unverified"),
+            blocked_reason=record.get("blocked_reason"),
         )
 
     def save(self, run: RcaRun) -> None:
@@ -161,6 +215,24 @@ class _LocalRunStore:
             "evaluation_result": run.evaluation_result,
             "model_prompt": run.model_prompt,
             "jira_event_ids": list(run.jira_event_ids),
+            "confirmed_observations": list(run.confirmed_observations),
+            "reported_claims": list(run.reported_claims),
+            "missing_evidence": list(run.missing_evidence),
+            "components": list(run.components),
+            "labels": list(run.labels),
+            "kb_domains": list(run.kb_domains),
+            "kb_passages": [
+                {
+                    "citation_id": passage.citation_id,
+                    "domain_id": passage.domain_id,
+                    "relative_path": passage.relative_path,
+                    "text": passage.text,
+                }
+                for passage in run.kb_passages
+            ],
+            "product_version": run.product_version,
+            "kb_version_applicability": run.kb_version_applicability,
+            "blocked_reason": run.blocked_reason,
         }
         (run_directory / "run.json").write_text(
             json.dumps(record, indent=2) + "\n", encoding="utf-8"
@@ -176,6 +248,8 @@ class RcaWorkflow:
         *,
         run_store: RunStore | None = None,
         fixture_runner: FixtureRunner | None = None,
+        jira_intelligence_client: JiraIntelligenceClient | None = None,
+        knowledge_base: KnowledgeBase | None = None,
     ) -> None:
         if run_store is None:
             if output_root is None:
@@ -183,28 +257,31 @@ class RcaWorkflow:
             run_store = _LocalRunStore(output_root)
         self._store = run_store
         self._fixture_runner = fixture_runner or _DefaultFixtureRunner()
+        self._jira_intelligence_client = jira_intelligence_client or _DefaultFixtureJiraIntelligence()
+        self._knowledge_base = knowledge_base or _DefaultFixtureKnowledgeBase()
 
-    def run(self, issue_key: str, model: str) -> RcaRun:
-        """Start and finish one deterministic Fixture Runner RCA Run."""
+    def run(self, issue_key: str, model: str, product_version: str | None = None) -> RcaRun:
+        """Start and finish one Fixture Runner RCA Run using collected evidence."""
         if model != "fixture":
-            raise ValueError("Ticket 1 supports only the explicit fixture model")
+            raise ValueError("Ticket 2 supports only the explicit fixture model")
         if not issue_key.strip():
             raise ValueError("issue_key must not be empty")
-        return self._complete_fixture_run(
+        return self._continue_fixture_run(
             self._store.create(
                 issue_key,
                 model,
                 self._fixture_runner.provenance_for(issue_key),
-            )
+            ),
+            product_version,
         )
 
     def resume(self, run_id: str) -> RcaRun:
-        """Continue a saved Fixture Runner run without creating another run."""
+        """Continue a saved Fixture Runner run without repeating saved stages."""
         run = self._store.load(run_id)
         self._validate_history(run)
         if run.model != "fixture":
-            raise ValueError("Ticket 1 can resume only fixture runs")
-        return self._complete_fixture_run(run)
+            raise ValueError("Ticket 2 can resume only fixture runs")
+        return self._continue_fixture_run(run, run.product_version)
 
     def get(self, run_id: str) -> RcaRun:
         """Read one persisted RCA Run without advancing it."""
@@ -212,13 +289,66 @@ class RcaWorkflow:
         self._validate_history(run)
         return run
 
-    def _complete_fixture_run(self, run: RcaRun) -> RcaRun:
+    def _continue_fixture_run(self, run: RcaRun, product_version: str | None) -> RcaRun:
+        if run.state == "created":
+            try:
+                collection = self._jira_intelligence_client.collect_or_reuse(run.issue_key, run.run_id)
+            except JiraIntelligenceError as error:
+                return self._block(run, str(error))
+            run = replace(
+                run,
+                collection_run_id=collection.collection_run_id,
+                confirmed_observations=collection.evidence.confirmed_observations,
+                reported_claims=collection.evidence.reported_claims,
+                missing_evidence=collection.evidence.missing_evidence,
+                components=collection.evidence.components,
+                labels=collection.evidence.labels,
+            )
+            run = self._advance(run)
+        if run.state == "collected":
+            run = self._advance(run)
+        if run.state == "evidence_ready":
+            try:
+                selection = self._knowledge_base.retrieve(self._evidence_from(run), product_version)
+            except KnowledgeBaseError as error:
+                return self._block(run, str(error))
+            run = replace(
+                run,
+                kb_revision=selection.kb_revision,
+                kb_passage_ids=tuple(passage.citation_id for passage in selection.passages),
+                kb_domains=selection.domain_ids,
+                kb_passages=selection.passages,
+                product_version=product_version,
+                kb_version_applicability=selection.version_applicability,
+            )
+            run = self._advance(run)
         while run.state not in _TERMINAL_STATES:
             run = self._advance(run)
-        if not run.report_path.exists():
+        if run.state == "completed" and not run.report_path.exists():
             self._render_report(run)
         self._store.save(run)
         return run
+
+    def _block(self, run: RcaRun, reason: str) -> RcaRun:
+        blocked = replace(
+            run,
+            state="blocked",
+            state_history=(*run.state_history, "blocked"),
+            evaluation_result=None,
+            blocked_reason=reason,
+        )
+        self._store.save(blocked)
+        return blocked
+
+    def _evidence_from(self, run: RcaRun) -> EvidencePackage:
+        return EvidencePackage(
+            collection_run_id=run.collection_run_id,
+            confirmed_observations=run.confirmed_observations,
+            reported_claims=run.reported_claims,
+            missing_evidence=run.missing_evidence,
+            components=run.components,
+            labels=run.labels,
+        )
 
     def _advance(self, run: RcaRun) -> RcaRun:
         try:
@@ -250,24 +380,37 @@ class RcaWorkflow:
         run.report_path.write_text(
             "# RCA Report: " + run.issue_key + "\n\n"
             "## Outcome and confidence\n\n"
-            "Evaluation Result: needs_evidence. Fixture analysis has demo-only confidence.\n\n"
-            "## Jira observations\n\n"
-            "- Fixture Collection Run only; live Jira collection has not run.\n\n"
-            "## KB guidance and citations\n\n"
-            "- Fixture KB guidance only; live KB retrieval has not run.\n\n"
+            f"Evaluation Result: {run.evaluation_result}. Fixture analysis has demo-only confidence.\n\n"
+            + _markdown_list("Jira observations", run.confirmed_observations)
+            + _markdown_list("Reported but unverified claims", run.reported_claims)
+            + _markdown_list(
+                "KB guidance and citations",
+                tuple(
+                    f"[{passage.citation_id}] {passage.relative_path}: {passage.text.splitlines()[0]}"
+                    for passage in run.kb_passages
+                ),
+            )
+            +
             "## Hypotheses\n\n"
             "- Fixture hypothesis: confirm the live evidence before accepting this Hypothesis.\n\n"
-            "## Unknowns and missing evidence\n\n"
-            "- Live Jira and KB evidence are intentionally unavailable in fixture mode.\n\n"
+            + _markdown_list("Unknowns and missing evidence", run.missing_evidence)
+            +
             "## Next actions\n\n"
             "- Re-run with live adapters in a later ticket.\n\n"
             "## Provenance\n\n"
             f"- RCA Run: {run.run_id}\n"
             "- Model Runner: fixture\n"
-            f"- Collection Run: {run.collection_run_id.replace('_', ' ')}\n"
-            f"- KB revision: {run.kb_revision.replace('_', ' ')}\n"
+            f"- Collection Run: {run.collection_run_id}\n"
+            f"- KB revision: {run.kb_revision}\n"
+            f"- Product Version: {run.product_version or 'not provided'}\n"
+            f"- KB version applicability: {run.kb_version_applicability}\n"
             f"- Prompt: {run.model_prompt}\n"
             f"- Evaluation Result: {run.evaluation_result}\n"
             "- Writeback Decision: not requested\n",
             encoding="utf-8",
         )
+
+
+def _markdown_list(heading: str, values: tuple[str, ...]) -> str:
+    body = "\n".join(f"- {value}" for value in values) if values else "- None."
+    return f"## {heading}\n\n{body}\n\n"

@@ -4,8 +4,8 @@
 
 **Blocked by:** 01 — Fixture RCA Run from CLI.
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] The RCA Run records the linked immutable Collection Run and uses no direct Jira REST calls.
-- [ ] KB retrieval stays within the configured root, starts with the manifest, and selects no more than three domains and six KB Passages.
-- [ ] Optional Product Version and unverified version applicability are visible in provenance and the report.
+- [x] The RCA Run records the linked immutable Collection Run and uses no direct Jira REST calls.
+- [x] KB retrieval stays within the configured root, starts with the manifest, and selects no more than three domains and six KB Passages.
+- [x] Optional Product Version and unverified version applicability are visible in provenance and the report.

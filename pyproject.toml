@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "Local RCA orchestration CLI"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "pyyaml>=6.0,<7",
+]
 
 [project.scripts]
 rca-run = "rca_orchestrator.cli:run_main"

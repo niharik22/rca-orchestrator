@@ -6,6 +6,8 @@ import argparse
 import os
 from pathlib import Path
 
+from .jira_intelligence import JiraIntelligenceHttpClient
+from .knowledge_base import ManifestKnowledgeBase
 from .workflow import RcaRun, RcaWorkflow
 
 
@@ -22,12 +24,27 @@ def _print_run(run: RcaRun) -> None:
     print(f"RCA Report: {run.report_path}")
 
 
+def _configured_workflow(output_root: Path) -> RcaWorkflow:
+    jira_intelligence_url = os.environ.get("RCA_ORCHESTRATOR_JIRA_INTELLIGENCE_URL")
+    kb_root = os.environ.get("RCA_ORCHESTRATOR_KB_ROOT")
+    if not jira_intelligence_url:
+        raise ValueError("RCA_ORCHESTRATOR_JIRA_INTELLIGENCE_URL must be configured")
+    if not kb_root:
+        raise ValueError("RCA_ORCHESTRATOR_KB_ROOT must be configured")
+    return RcaWorkflow(
+        output_root,
+        jira_intelligence_client=JiraIntelligenceHttpClient(jira_intelligence_url),
+        knowledge_base=ManifestKnowledgeBase(Path(kb_root)),
+    )
+
+
 def run_main() -> None:
     parser = argparse.ArgumentParser(prog="rca-run")
     parser.add_argument("issue_key", nargs="?")
     parser.add_argument("--resume", metavar="RCA_RUN_ID")
     parser.add_argument("--model", choices=("fixture",))
     parser.add_argument("--output-root")
+    parser.add_argument("--product-version")
     arguments = parser.parse_args()
     if arguments.resume and arguments.issue_key:
         parser.error("issue_key cannot be used with --resume")
@@ -38,11 +55,14 @@ def run_main() -> None:
     if arguments.resume and arguments.model:
         parser.error("--model cannot be used with --resume")
 
-    workflow = RcaWorkflow(_output_root(arguments.output_root))
+    try:
+        workflow = _configured_workflow(_output_root(arguments.output_root))
+    except ValueError as error:
+        parser.error(str(error))
     run = (
         workflow.resume(arguments.resume)
         if arguments.resume
-        else workflow.run(arguments.issue_key, arguments.model)
+        else workflow.run(arguments.issue_key, arguments.model, arguments.product_version)
     )
     _print_run(run)
 
