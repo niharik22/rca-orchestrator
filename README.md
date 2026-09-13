@@ -130,6 +130,21 @@ the Jira read and (only if demonstrating writeback) separately scoped write
 credentials following the sibling project's README. Use a non-production Jira
 project for this rehearsal.
 
+Before starting Jira Intelligence, PostgreSQL must be installed, its service
+must be running, and the local database must exist. Use your organisation's
+approved PostgreSQL installation on the work laptop; `psql` and `pg_isready`
+should then be available in a new PowerShell session.
+
+```powershell
+psql --version
+pg_isready -d postgres
+createdb jira_intelligence  # Run once; skip it if the database already exists.
+```
+
+If `pg_isready` reports that no server is listening, start PostgreSQL before
+continuing. If your local database user, host, or port differs from the default,
+use the matching PostgreSQL connection URL in the next command.
+
 ```powershell
 Set-Location C:\development\jira-mcp
 $env:JIRA_INTELLIGENCE_WORKSPACE_ROOT = "C:\development\jira-intelligence-workspace"

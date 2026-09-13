@@ -4,8 +4,8 @@
 
 **Blocked by:** 03 — Add bounded Attachment Evidence; 05 — Perform terminal-confirmed Jira writeback.
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] Resume preserves completed external work and never repeats an avoidable Collection Run, model invocation, or Jira mutation.
-- [ ] Adversarial workflow tests cover Blocked Runs, malformed model output, missing evidence, declined writeback, and idempotent retry behavior without live accounts.
-- [ ] Setup and demo guidance explains the sibling-project configuration, Copilot authentication prerequisite, fixture fallback, and Windows-compatible execution path.
+- [x] Resume preserves completed external work and never repeats an avoidable Collection Run, model invocation, or Jira mutation.
+- [x] Adversarial workflow tests cover Blocked Runs, malformed model output, missing evidence, declined writeback, and idempotent retry behavior without live accounts.
+- [x] Setup and demo guidance explains the sibling-project configuration, Copilot authentication prerequisite, fixture fallback, and Windows-compatible execution path.
