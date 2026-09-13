@@ -3,8 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 import json
 
+import pytest
+
 from rca_orchestrator.evidence import CollectionEvidence, EvidencePackage
-from rca_orchestrator.jira_intelligence import JiraIntelligenceHttpClient
+from rca_orchestrator.jira_intelligence import JiraIntelligenceError, JiraIntelligenceHttpClient
 from rca_orchestrator.workflow import FixtureProvenance, RcaWorkflow
 
 
@@ -63,6 +65,11 @@ def test_confirmed_passed_writeback_posts_a_comment_and_only_the_markdown_report
         analysis_root / "PC-123" / "runs" / "fixture-collection-PC-123" / "analysis" / "rca-report.md"
     )
     assert analysis_report.read_text(encoding="utf-8") == run.report_path.read_text(encoding="utf-8")
+    assert workflow.get(run.run_id).writeback_event_ids == ("comment-event", "attachment-event")
+
+    declined_after_approval = workflow.confirm_writeback(run.run_id, approved=False)
+
+    assert declined_after_approval.writeback_decision == "approved"
 
 
 def test_confirmed_non_passing_writeback_posts_only_a_clearly_labelled_status_comment(tmp_path: Path) -> None:
@@ -80,6 +87,27 @@ def test_confirmed_non_passing_writeback_posts_only_a_clearly_labelled_status_co
         "RCA Orchestrator status: Evaluation Result is escalated. "
         "No RCA Report is attached; this result requires follow-up before a root-cause conclusion."
     )
+    assert jira.uploads == []
+
+
+def test_passed_writeback_rejects_an_analysis_directory_with_an_unrelated_artifact(tmp_path: Path) -> None:
+    jira = _WritebackJiraIntelligence()
+    analysis_root = tmp_path / "jira-intelligence-workspace"
+    analysis_directory = analysis_root / "PC-123" / "runs" / "fixture-collection-PC-123" / "analysis"
+    analysis_directory.mkdir(parents=True)
+    (analysis_directory / "unrelated.txt").write_text("do not upload", encoding="utf-8")
+    workflow = RcaWorkflow(
+        output_root=tmp_path / "outputs",
+        analysis_root=analysis_root,
+        jira_intelligence_client=jira,
+        fixture_runner=_FixtureRunner("passed"),
+    )
+    run = workflow.run("PC-123", "fixture")
+
+    with pytest.raises(JiraIntelligenceError, match="outside this RCA Report"):
+        workflow.confirm_writeback(run.run_id, approved=True)
+
+    assert jira.comments == []
     assert jira.uploads == []
 
 

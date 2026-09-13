@@ -4,8 +4,8 @@
 
 **Blocked by:** 04 — Run live Copilot analysis and independent evaluation.
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] A declined decision produces no Jira mutation.
-- [ ] `needs_evidence` and `escalated` outcomes write only a clearly labelled Status Comment after confirmation.
-- [ ] A passed result posts one provenance-rich comment and uploads only the Markdown RCA Report using Jira Intelligence idempotency.
+- [x] A declined decision produces no Jira mutation.
+- [x] `needs_evidence` and `escalated` outcomes write only a clearly labelled Status Comment after confirmation.
+- [x] A passed result posts one provenance-rich comment and uploads only the Markdown RCA Report using Jira Intelligence idempotency.

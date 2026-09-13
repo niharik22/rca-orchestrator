@@ -106,9 +106,14 @@ def run_main() -> None:
     _print_run(run)
     if run.state == "completed" and run.evaluation_result in {"passed", "needs_evidence", "escalated"}:
         try:
-            decided = workflow.confirm_writeback(
-                run.run_id, approved=input("Write this RCA evaluation back to Jira? [y/N]: ").strip().lower() == "y"
-            )
+            if run.writeback_decision == "not_requested":
+                decided = workflow.confirm_writeback(
+                    run.run_id, approved=input("Write this RCA evaluation back to Jira? [y/N]: ").strip().lower() == "y"
+                )
+            elif run.writeback_decision == "approved":
+                decided = workflow.confirm_writeback(run.run_id, approved=True)
+            else:
+                decided = run
         except (JiraIntelligenceError, ValueError) as error:
             parser.error(str(error))
         print(f"Writeback Decision: {decided.writeback_decision}")

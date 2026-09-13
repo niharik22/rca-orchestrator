@@ -387,6 +387,8 @@ class RcaWorkflow:
             raise WorkflowTransitionError("Writeback requires a completed RCA Run with an Evaluation Result.")
         if run.writeback_decision == "declined":
             return run
+        if run.writeback_decision == "approved" and not approved:
+            return run
         if not approved:
             decided = replace(run, writeback_decision="declined")
             self._update_report_writeback_decision(decided)
