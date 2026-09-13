@@ -72,6 +72,31 @@ def test_confirmed_passed_writeback_posts_a_comment_and_only_the_markdown_report
     assert declined_after_approval.writeback_decision == "approved"
 
 
+def test_resumed_approved_writeback_reuses_the_same_idempotency_keys(tmp_path: Path) -> None:
+    jira = _WritebackJiraIntelligence()
+    workflow = RcaWorkflow(
+        output_root=tmp_path / "outputs",
+        analysis_root=tmp_path / "jira-intelligence-workspace",
+        jira_intelligence_client=jira,
+        fixture_runner=_FixtureRunner("passed"),
+    )
+    original = workflow.run("PC-123", "fixture")
+    workflow.confirm_writeback(original.run_id, approved=True)
+
+    resumed = workflow.resume(original.run_id)
+    replayed = workflow.confirm_writeback(resumed.run_id, approved=True)
+
+    assert replayed.writeback_event_ids == ("comment-event", "attachment-event")
+    assert [comment["idempotency_key"] for comment in jira.comments] == [
+        f"rca-comment-{original.run_id}",
+        f"rca-comment-{original.run_id}",
+    ]
+    assert [upload["idempotency_key"] for upload in jira.uploads] == [
+        f"rca-attachment-{original.run_id}",
+        f"rca-attachment-{original.run_id}",
+    ]
+
+
 def test_confirmed_non_passing_writeback_posts_only_a_clearly_labelled_status_comment(tmp_path: Path) -> None:
     jira = _WritebackJiraIntelligence()
     workflow = RcaWorkflow(

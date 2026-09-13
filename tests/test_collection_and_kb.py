@@ -93,6 +93,21 @@ def test_jira_intelligence_failure_persists_a_blocked_run_without_a_report(tmp_p
     assert not run.report_path.exists()
 
 
+def test_resuming_a_blocked_collection_run_does_not_retry_the_failed_collection(tmp_path: Path) -> None:
+    jira = _FailingJiraIntelligence()
+    workflow = RcaWorkflow(
+        output_root=tmp_path,
+        jira_intelligence_client=jira,
+        knowledge_base=_FakeKnowledgeBase(),
+    )
+    original = workflow.run(issue_key="PC-123", model="fixture")
+
+    resumed = workflow.resume(original.run_id)
+
+    assert resumed == original
+    assert jira.requests == ["PC-123"]
+
+
 def test_manifest_kb_selects_bounded_cited_passages_and_marks_absent_product_version(tmp_path: Path) -> None:
     _write_kb(
         tmp_path,
@@ -502,7 +517,11 @@ class _FakeKnowledgeBase:
 
 
 class _FailingJiraIntelligence:
+    def __init__(self) -> None:
+        self.requests: list[str] = []
+
     def collect_or_reuse(self, issue_key: str, rca_run_id: str) -> CollectionEvidence:
+        self.requests.append(issue_key)
         raise JiraIntelligenceError("Jira Intelligence collection is unavailable.")
 
 

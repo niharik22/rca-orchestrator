@@ -175,6 +175,26 @@ def test_resume_preflights_a_copilot_run_before_another_model_invocation(tmp_pat
     assert workflow.get(original.run_id).state == "kb_ready"
 
 
+def test_resuming_a_completed_copilot_run_does_not_repeat_collection_or_model_work(tmp_path: Path) -> None:
+    jira = _FakeJiraIntelligence()
+    model_runner = _FakeModelRunner(
+        analyst_output=_valid_analyst_output(), evaluator_output=_valid_evaluator_output()
+    )
+    workflow = RcaWorkflow(
+        output_root=tmp_path,
+        jira_intelligence_client=jira,
+        knowledge_base=_FakeKnowledgeBase(),
+        model_runner=model_runner,
+    )
+    original = workflow.run("PC-123", "copilot")
+
+    resumed = workflow.resume(original.run_id)
+
+    assert resumed == original
+    assert jira.collection_requests == [("PC-123", original.run_id)]
+    assert model_runner.calls == ["preflight", "analyst", "evaluator"]
+
+
 class _FakeJiraIntelligence:
     def __init__(self) -> None:
         self.collection_requests: list[tuple[str, str]] = []
