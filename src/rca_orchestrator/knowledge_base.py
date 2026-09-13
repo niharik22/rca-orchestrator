@@ -56,17 +56,18 @@ class ManifestKnowledgeBase:
         manifest = self._load_yaml(self._root / "manifest.yaml")
         domains = self._domains(manifest)
         selected_domains = self._select_domains(domains, evidence.retrieval_terms)
-        passages = tuple(
-            passage
-            for domain in selected_domains
-            for passage in self._passages_for_domain(domain)
-        )[:6]
+        passages: list[KBPassage] = []
+        for domain in selected_domains:
+            remaining = 6 - len(passages)
+            if remaining == 0:
+                break
+            passages.extend(self._passages_for_domain(domain, remaining))
         revision = _optional_string(manifest, "kb_revision") or _optional_string(manifest, "version") or "unknown"
         return KBSelection(
             kb_revision=revision,
             version_applicability="unverified" if product_version is None else "not_verified",
             domain_ids=tuple(domain.domain_id for domain in selected_domains),
-            passages=passages,
+            passages=tuple(passages),
         )
 
     def _domains(self, manifest: dict[str, Any]) -> tuple[_Domain, ...]:
@@ -99,7 +100,7 @@ class ManifestKnowledgeBase:
         ]
         return tuple(domain for score, domain in sorted(scored, key=lambda item: (-item[0], item[1].domain_id)) if score > 0)[:3]
 
-    def _passages_for_domain(self, domain: _Domain) -> tuple[KBPassage, ...]:
+    def _passages_for_domain(self, domain: _Domain, maximum: int) -> tuple[KBPassage, ...]:
         domain_root = self._contained_path(domain.relative_path)
         index = self._load_yaml(domain_root / "index.yaml")
         raw_passages = index.get("passages", ("concepts.md", "patterns.md"))
@@ -117,12 +118,14 @@ class ManifestKnowledgeBase:
             relative = path.relative_to(self._root).as_posix()
             passages.append(
                 KBPassage(
-                    citation_id=f"{domain.domain_id}:{Path(relative_path).name}",
+                    citation_id=f"{domain.domain_id}:{relative}",
                     domain_id=domain.domain_id,
                     relative_path=relative,
                     text=source[:4000],
                 )
             )
+            if len(passages) == maximum:
+                break
         return tuple(passages)
 
     def _load_yaml(self, path: Path) -> dict[str, Any]:

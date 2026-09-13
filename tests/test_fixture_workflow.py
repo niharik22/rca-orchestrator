@@ -193,9 +193,6 @@ class _FixtureRunner:
     def provenance_for(self, issue_key: str) -> FixtureProvenance:
         self.requested_issue_keys.append(issue_key)
         return FixtureProvenance(
-            collection_run_id="fixture-collection-from-test",
-            kb_revision="fixture-kb-from-test",
-            kb_passage_ids=(),
             evaluation_result="needs_evidence",
             model_prompt="fixture-v1",
             jira_event_ids=(),
@@ -216,9 +213,9 @@ class _InMemoryRunStore:
             state_history=("created",),
             report_path=self._output_root / "rca-report.md",
             writeback_decision="not_requested",
-            collection_run_id=provenance.collection_run_id,
-            kb_revision=provenance.kb_revision,
-            kb_passage_ids=provenance.kb_passage_ids,
+            collection_run_id=None,
+            kb_revision=None,
+            kb_passage_ids=(),
             evaluation_result=provenance.evaluation_result,
             model_prompt=provenance.model_prompt,
             jira_event_ids=provenance.jira_event_ids,

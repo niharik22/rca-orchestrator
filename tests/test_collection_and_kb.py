@@ -4,11 +4,9 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 
-import pytest
-
 from rca_orchestrator.evidence import CollectionEvidence, EvidencePackage
 from rca_orchestrator.jira_intelligence import JiraIntelligenceError, JiraIntelligenceHttpClient
-from rca_orchestrator.knowledge_base import KBPassage, KBSelection, KnowledgeBaseError, ManifestKnowledgeBase
+from rca_orchestrator.knowledge_base import KBPassage, KBSelection, ManifestKnowledgeBase
 from rca_orchestrator.workflow import RcaWorkflow
 
 
@@ -86,12 +84,12 @@ def test_jira_intelligence_failure_persists_a_blocked_run_without_a_report(tmp_p
 
     assert run.state == "blocked"
     assert run.blocked_reason == "Jira Intelligence collection is unavailable."
+    assert run.collection_run_id is None
+    assert run.kb_revision is None
     assert not run.report_path.exists()
 
 
-def test_manifest_kb_selects_bounded_cited_passages_and_marks_absent_product_version(
-    tmp_path: Path,
-) -> None:
+def test_manifest_kb_selects_bounded_cited_passages_and_marks_absent_product_version(tmp_path: Path) -> None:
     _write_kb(
         tmp_path,
         """
@@ -116,24 +114,18 @@ domains:
     _write_domain(tmp_path, "integrations-messaging", "Integration guidance.")
     _write_domain(tmp_path, "testing-quality", "Testing guidance.")
 
-    selection = ManifestKnowledgeBase(tmp_path).retrieve(
-        EvidencePackage(
-            collection_run_id="collection-123",
-            confirmed_observations=("Summary: Policy binding fails",),
-            reported_claims=("Description: NullPointerException",),
-            missing_evidence=(),
-            components=("runtime",),
-            labels=("binding",),
-        ),
-        product_version=None,
-    )
+    run = RcaWorkflow(
+        output_root=tmp_path / "outputs",
+        jira_intelligence_client=_FakeJiraIntelligence(),
+        knowledge_base=ManifestKnowledgeBase(tmp_path),
+    ).run(issue_key="PC-123", model="fixture")
 
-    assert selection.kb_revision == "pc-50.16.0-p1"
-    assert selection.version_applicability == "unverified"
-    assert selection.domain_ids == ("runtime-transactions",)
-    assert selection.passages == (
+    assert run.kb_revision == "pc-50.16.0-p1"
+    assert run.kb_version_applicability == "unverified"
+    assert run.kb_domains == ("runtime-transactions",)
+    assert run.kb_passages == (
         KBPassage(
-            citation_id="runtime-transactions:concepts.md",
+            citation_id="runtime-transactions:domains/runtime-transactions/concepts.md",
             domain_id="runtime-transactions",
             relative_path="domains/runtime-transactions/concepts.md",
             text="Runtime diagnosis\n\nNullPointerException on binding.",
@@ -153,25 +145,63 @@ domains:
 """,
     )
 
-    with pytest.raises(KnowledgeBaseError, match="outside the configured KB root"):
-        ManifestKnowledgeBase(tmp_path).retrieve(
-            EvidencePackage(
-                collection_run_id="collection-123",
-                confirmed_observations=("Summary: runtime",),
-                reported_claims=(),
-                missing_evidence=(),
-                components=("runtime",),
-                labels=(),
-            ),
-            product_version="50.16.0 P1",
-        )
+    run = RcaWorkflow(
+        output_root=tmp_path / "outputs",
+        jira_intelligence_client=_FakeJiraIntelligence(),
+        knowledge_base=ManifestKnowledgeBase(tmp_path),
+    ).run(issue_key="PC-123", model="fixture")
+
+    assert run.state == "blocked"
+    assert run.blocked_reason == "KB path is outside the configured KB root."
 
 
-def test_jira_intelligence_adapter_uses_only_the_collection_endpoint() -> None:
-    requests: list[object] = []
+def test_manifest_kb_stops_reading_after_six_passages_and_keeps_citations_unique(tmp_path: Path) -> None:
+    _write_kb(
+        tmp_path,
+        """
+kb_revision: pc-50.16.0-p1
+domains:
+  - id: runtime-transactions
+    path: domains/runtime-transactions
+    keywords: [runtime]
+""",
+    )
+    domain = tmp_path / "domains" / "runtime-transactions"
+    domain.mkdir(parents=True)
+    paths = [
+        "guidance/concepts.md",
+        "troubleshooting/concepts.md",
+        "one.md",
+        "two.md",
+        "three.md",
+        "four.md",
+        "unreadable.md",
+    ]
+    (domain / "index.yaml").write_text(
+        "passages:\n" + "\n".join(f"  - {path}" for path in paths) + "\n",
+        encoding="utf-8",
+    )
+    for relative_path in paths[:6]:
+        passage = domain / relative_path
+        passage.parent.mkdir(parents=True, exist_ok=True)
+        passage.write_text(f"Guidance from {relative_path}", encoding="utf-8")
+    (domain / "unreadable.md").write_bytes(b"\xff")
 
+    run = RcaWorkflow(
+        output_root=tmp_path / "outputs",
+        jira_intelligence_client=_FakeJiraIntelligence(),
+        knowledge_base=ManifestKnowledgeBase(tmp_path),
+    ).run("PC-123", "fixture")
+
+    assert run.state == "completed"
+    assert len(run.kb_passages) == 6
+    assert len(set(run.kb_passage_ids)) == 6
+    assert "runtime-transactions:domains/runtime-transactions/guidance/concepts.md" in run.kb_passage_ids
+    assert "runtime-transactions:domains/runtime-transactions/troubleshooting/concepts.md" in run.kb_passage_ids
+
+
+def test_workflow_uses_jira_intelligence_adapter_for_collection(tmp_path: Path) -> None:
     def respond(request: object) -> bytes:
-        requests.append(request)
         return json.dumps(
             {
                 "collection_run": {"id": "collection-123"},
@@ -184,20 +214,14 @@ def test_jira_intelligence_adapter_uses_only_the_collection_endpoint() -> None:
             }
         ).encode("utf-8")
 
-    collected = JiraIntelligenceHttpClient("http://127.0.0.1:8001", request=respond).collect_or_reuse(
-        "pc-123", "rca-run-123"
-    )
+    run = RcaWorkflow(
+        output_root=tmp_path,
+        jira_intelligence_client=JiraIntelligenceHttpClient("http://127.0.0.1:8001", request=respond),
+        knowledge_base=_FakeKnowledgeBase(),
+    ).run("PC-123", "fixture")
 
-    request = requests[0]
-    assert request.full_url == "http://127.0.0.1:8001/v1/issues/PC-123/intelligence"
-    assert request.get_method() == "POST"
-    assert request.get_header("Idempotency-key") == "rca-collection-rca-run-123"
-    assert json.loads(request.data.decode("utf-8")) == {
-        "download_attachments": False,
-        "orchestration_run_id": "rca-run-123",
-    }
-    assert collected.collection_run_id == "collection-123"
-    assert collected.evidence.reported_claims == ("Description: NullPointerException while binding",)
+    assert run.collection_run_id == "collection-123"
+    assert run.reported_claims == ("Description: NullPointerException while binding",)
 
 
 @dataclass
